@@ -280,6 +280,16 @@ function publicExportsBody(): string {
 export async function wakeContainer(session: Session): Promise<boolean> {
   const runtime = resolveRuntimeName(session);
   try {
+    // Project destinations/routing before ANY runtime wake (docker, process, …).
+    // spawnContainer (docker) also does this; process/other drivers must not skip it
+    // or the agent wakes with an empty destinations map and cannot deliver.
+    if (hasTable(getDb(), 'agent_destinations')) {
+      const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
+      writeDestinations(session.agent_group_id, session.id);
+    }
+    writeSessionRouting(session.agent_group_id, session.id);
+    // @nanoclaw-sessionio:wake-prepare-meta:begin
+    // @nanoclaw-sessionio:wake-prepare-meta:end
     return await resolveRuntimeDriver(session).wake(session, {});
   } catch (err) {
     if (runtime === 'docker') {
