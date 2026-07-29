@@ -399,6 +399,10 @@ export function patchIndex(source: string): string {
         .filter(Boolean);
       const next = parts.filter((s) => s !== "cleanupOrphans");
       if (next.length === parts.length) return match;
+      if (next.length === 0) {
+        // Only cleanupOrphans was imported — drop the whole statement.
+        return "";
+      }
       return `import { ${next.join(", ")} } from './container-runtime.js';`;
     },
   );

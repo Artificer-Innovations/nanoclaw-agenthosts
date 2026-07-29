@@ -189,6 +189,19 @@ async function main(): Promise<void> {
     );
   });
 
+  it("drops the container-runtime import when it only imported cleanupOrphans", () => {
+    const source = `import { cleanupOrphans } from './container-runtime.js';
+
+async function main(): Promise<void> {
+  cleanupOrphans();
+}
+`;
+    const patched = patchIndex(source);
+    expect(patched).toContain("await runRuntimeOrphanCleanup()");
+    expect(patched).not.toContain("from './container-runtime.js'");
+    expect(patched).not.toMatch(/import \{\s*\} from/);
+  });
+
   it("keeps existing cleanupOrphans import on uninstall when already present", () => {
     const patched = `import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 // @nanoclaw-agenthosts:index-import:begin
