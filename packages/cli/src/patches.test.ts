@@ -118,6 +118,34 @@ describe("patchContainerRunner", () => {
     );
   });
 
+  it("preserves sessionio wake-prepare-meta when refreshing public-exports", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate sessionio filling the agenthosts-owned slot (markers may be
+    // unindented — match what sessionio's marked() emits today).
+    const filled = installed.replace(
+      "    // @nanoclaw-sessionio:wake-prepare-meta-slot",
+      `// @nanoclaw-sessionio:wake-prepare-meta:begin
+    { void transport.syncSessionMeta?.(ctx, meta); }
+// @nanoclaw-sessionio:wake-prepare-meta:end`,
+    );
+    expect(filled).toContain("wake-prepare-meta:begin");
+    expect(filled).not.toContain("wake-prepare-meta-slot");
+
+    const refreshed = patchContainerRunner(filled);
+    expect(refreshed).toContain("@nanoclaw-sessionio:wake-prepare-meta:begin");
+    expect(refreshed).toContain("void transport.syncSessionMeta?.(ctx, meta)");
+    expect(refreshed).not.toContain("wake-prepare-meta-slot");
+    // Stale public-exports copy still refreshes around the preserved fill.
+    const stale = refreshed.replace(
+      "falling back to docker map",
+      "OLD_FALLBACK_TEXT",
+    );
+    const upgraded = patchContainerRunner(stale);
+    expect(upgraded).toContain("falling back to docker map");
+    expect(upgraded).toContain("void transport.syncSessionMeta?.(ctx, meta)");
+    expect(patchContainerRunner(upgraded)).toBe(upgraded);
+  });
+
   it("keeps sessions-import as a sibling of container-import (not nested)", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     const containerEnd = patched.indexOf(END("container-import"));

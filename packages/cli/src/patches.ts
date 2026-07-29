@@ -303,8 +303,41 @@ registerRuntimeDriver('docker', {
   return content;
 }
 
-function publicExportsBody(): string {
-  return `export function isContainerRunning(sessionId: string): boolean {
+/** Empty slot owned by agenthosts; sessionio replaces it with wake-prepare-meta. */
+const SESSIONIO_WAKE_PREPARE_SLOT =
+  "    // @nanoclaw-sessionio:wake-prepare-meta-slot";
+
+/**
+ * Keep sessionio's filled wake-prepare-meta (or the empty slot) when refreshing
+ * public-exports. Without this, every agenthosts upgrade/verify wipes the fill
+ * and verify fails with "missing agenthosts call sites" after sessionio install.
+ */
+function extractWakePrepareFragment(source: string): string {
+  const regionStart = source.indexOf(begin("public-exports"));
+  const regionEndMarker = end("public-exports");
+  const regionEnd = source.indexOf(regionEndMarker);
+  const region =
+    regionStart >= 0 && regionEnd > regionStart
+      ? source.slice(regionStart, regionEnd)
+      : source;
+
+  const filled = region.match(
+    /^[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta:begin\r?\n[\s\S]*?^[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta:end(?=\r?\n)/m,
+  );
+  if (filled) return filled[0];
+
+  const slot = region.match(
+    /^[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta-slot(?=\r?\n)/m,
+  );
+  if (slot) return slot[0];
+
+  return SESSIONIO_WAKE_PREPARE_SLOT;
+}
+
+function publicExportsBody(
+  wakePrepareFragment: string = SESSIONIO_WAKE_PREPARE_SLOT,
+): string {
+  const body = `export function isContainerRunning(sessionId: string): boolean {
   const session = getSession(sessionId);
   if (!session) return isContainerRunningDocker(sessionId);
   const runtime = resolveRuntimeName(session);
@@ -373,6 +406,9 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
     throw err;
   }
 }`;
+  // Filled sessionio blocks may use different marker indentation; substitute whole.
+  if (wakePrepareFragment === SESSIONIO_WAKE_PREPARE_SLOT) return body;
+  return body.replace(SESSIONIO_WAKE_PREPARE_SLOT, wakePrepareFragment);
 }
 
 function refreshPublicExports(source: string): string {
@@ -391,7 +427,10 @@ function refreshPublicExports(source: string): string {
   const cut = afterEnd + trailingNewline + trailingCr;
   return (
     source.slice(0, start) +
-    marked("public-exports", publicExportsBody()) +
+    marked(
+      "public-exports",
+      publicExportsBody(extractWakePrepareFragment(source)),
+    ) +
     "\n" +
     source.slice(cut)
   );
