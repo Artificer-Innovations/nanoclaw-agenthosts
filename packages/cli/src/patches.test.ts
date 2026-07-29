@@ -32,6 +32,23 @@ describe("patchContainerRunner", () => {
     expect(patchContainerRunner(once)).toBe(once);
   });
 
+  it("widens an older agenthosts import on upgrade when refreshing public-exports", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate a prior install that omitted resolveRuntimeName / setSessionTransportResolver
+    // (upgrade used to refresh public-exports without widening the import → tsc fail).
+    const staleImport = installed.replace(
+      "import { registerRuntimeDriver, resolveRuntimeDriver, resolveRuntimeName, setContainerConfigReader, setSessionTransportResolver } from './agenthosts.js';",
+      "import { registerRuntimeDriver, resolveRuntimeDriver, setContainerConfigReader } from './agenthosts.js';",
+    );
+    expect(staleImport).not.toContain("resolveRuntimeName");
+    const upgraded = patchContainerRunner(staleImport);
+    expect(upgraded).toContain(
+      "import { registerRuntimeDriver, resolveRuntimeDriver, resolveRuntimeName, setContainerConfigReader, setSessionTransportResolver } from './agenthosts.js';",
+    );
+    expect(upgraded).toContain("const runtime = resolveRuntimeName(session);");
+    expect(patchContainerRunner(upgraded)).toBe(upgraded);
+  });
+
   it("keeps sessions-import as a sibling of container-import (not nested)", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     const containerEnd = patched.indexOf(END("container-import"));

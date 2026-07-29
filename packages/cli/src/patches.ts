@@ -108,6 +108,42 @@ const STOCK_RUNTIME_IMPORT =
 const PATCHED_RUNTIME_IMPORT =
   "import { CONTAINER_RUNTIME_BIN, cleanupOrphans, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';";
 
+const CONTAINER_IMPORT_SYMBOLS = [
+  "registerRuntimeDriver",
+  "resolveRuntimeDriver",
+  "resolveRuntimeName",
+  "setContainerConfigReader",
+  "setSessionTransportResolver",
+] as const;
+
+/**
+ * Widen `./agenthosts.js` import to the current symbol set on upgrade.
+ * Older installs omit resolveRuntimeName / setSessionTransportResolver while
+ * refreshPublicExports already emits bodies that call resolveRuntimeName.
+ */
+function widenAgenthostsImport(source: string): string {
+  const re = /import \{([^}]+)\} from '\.\/agenthosts\.js';/;
+  const match = source.match(re);
+  if (!match) return source;
+  const current = match[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const missing = CONTAINER_IMPORT_SYMBOLS.filter(
+    (symbol) => !current.includes(symbol),
+  );
+  if (missing.length === 0) return source;
+  const extras = current.filter(
+    (symbol) =>
+      !(CONTAINER_IMPORT_SYMBOLS as readonly string[]).includes(symbol),
+  );
+  const ordered = [...CONTAINER_IMPORT_SYMBOLS, ...extras];
+  return source.replace(
+    re,
+    `import { ${ordered.join(", ")} } from './agenthosts.js';`,
+  );
+}
+
 export function patchContainerRunner(source: string): string {
   const coreNames = [
     "container-import",
@@ -120,8 +156,9 @@ export function patchContainerRunner(source: string): string {
 
   // Already installed (v1): ensure sibling imports + refresh public-exports body.
   if (coreNames.every((name) => source.includes(begin(name)))) {
-    let content = installImport(
-      source,
+    let content = widenAgenthostsImport(source);
+    content = installImport(
+      content,
       "./db/sessions.js",
       ["getSession"],
       "sessions-import",
@@ -146,13 +183,7 @@ export function patchContainerRunner(source: string): string {
   let content = installImport(
     source,
     "./agenthosts.js",
-    [
-      "registerRuntimeDriver",
-      "resolveRuntimeDriver",
-      "resolveRuntimeName",
-      "setContainerConfigReader",
-      "setSessionTransportResolver",
-    ],
+    [...CONTAINER_IMPORT_SYMBOLS],
     "container-import",
   );
 
