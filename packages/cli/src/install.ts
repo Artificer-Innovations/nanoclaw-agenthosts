@@ -127,8 +127,15 @@ export function runUninstall(root?: string): {
   }
   commitWrites(pending);
 
+  // warn-once.ts is also shipped by nanoclaw-hosthooks; leave it when hosthooks
+  // is present so uninstall does not break a still-installed hosthooks tree.
+  const preserveWarnOnce = fs.existsSync(
+    path.join(nanoclawRoot, "src/hosthooks.ts"),
+  );
+
   const removed: string[] = [];
   for (const rule of HOST_COPY_RULES) {
+    if (rule.dest === "src/warn-once.ts" && preserveWarnOnce) continue;
     const target = path.join(nanoclawRoot, rule.dest);
     if (fs.existsSync(target)) {
       fs.unlinkSync(target);

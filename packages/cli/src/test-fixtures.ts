@@ -8,9 +8,11 @@ export const fixtureSources = {
 import { runContainerEnvContributors } from './hosthooks.js';
 // @nanoclaw-hosthooks:container-import:end
 import { ChildProcess, spawn } from 'child_process';
+import { getDb, hasTable } from './db/connection.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { log } from './log.js';
+import { writeSessionRouting } from './session-manager.js';
 import type { Session } from './types.js';
 
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();

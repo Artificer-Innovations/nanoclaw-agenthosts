@@ -32,6 +32,147 @@ describe("patchContainerRunner", () => {
     expect(patchContainerRunner(once)).toBe(once);
   });
 
+  it("widens an older agenthosts import on upgrade when refreshing public-exports", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate a prior install that omitted resolveRuntimeName / setSessionTransportResolver
+    // (upgrade used to refresh public-exports without widening the import → tsc fail).
+    // Match by regex so symbol order / spacing / quotes in the generated import may vary.
+    const staleImport = installed.replace(
+      /import\s*\{[^}]*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
+      "import { registerRuntimeDriver, resolveRuntimeDriver, setContainerConfigReader } from './agenthosts.js';",
+    );
+    expect(staleImport).toMatch(
+      /import\s*\{\s*registerRuntimeDriver\s*,\s*resolveRuntimeDriver\s*,\s*setContainerConfigReader\s*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
+    );
+    expect(staleImport).not.toMatch(
+      /import\s*\{[^}]*\bresolveRuntimeName\b[^}]*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
+    );
+    const upgraded = patchContainerRunner(staleImport);
+    expect(upgraded).toMatch(
+      /import\s*\{[^}]*\bresolveRuntimeName\b[^}]*\bsetSessionTransportResolver\b[^}]*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
+    );
+    expect(upgraded).toContain("const runtime = resolveRuntimeName(session);");
+    expect(patchContainerRunner(upgraded)).toBe(upgraded);
+  });
+
+  it("keeps unknown agenthosts import symbols when widening on upgrade", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withExtra = installed.replace(
+      /import\s*\{[^}]*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
+      "import { registerRuntimeDriver, resolveRuntimeDriver, setContainerConfigReader, someFutureHelper } from './agenthosts.js';",
+    );
+    const upgraded = patchContainerRunner(withExtra);
+    expect(upgraded).toMatch(
+      /import\s*\{\s*registerRuntimeDriver\s*,\s*resolveRuntimeDriver\s*,\s*resolveRuntimeName\s*,\s*setContainerConfigReader\s*,\s*setSessionTransportResolver\s*,\s*someFutureHelper\s*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
+    );
+  });
+
+  it("does not widen an agenthosts import outside the container-import marker", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withUserImport = `${installed}\nimport { registerRuntimeDriver } from './agenthosts.js';\n`;
+    const upgraded = patchContainerRunner(withUserImport);
+    // Trailing user-owned import stays narrow; marked block is widened.
+    expect(upgraded).toMatch(
+      /\nimport \{ registerRuntimeDriver \} from '\.\/agenthosts\.js';\n$/,
+    );
+    expect(upgraded).toMatch(
+      /@nanoclaw-agenthosts:container-import:begin[\s\S]*\bresolveRuntimeName\b[\s\S]*@nanoclaw-agenthosts:container-import:end/,
+    );
+  });
+
+  it("still refreshes public-exports when the agenthosts import line is missing", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withoutImport = installed.replace(
+      /^[ \t]*import\s*\{[^}]*\}\s*from\s*['"]\.\/agenthosts\.js['"];\r?\n/m,
+      "",
+    );
+    expect(withoutImport).not.toMatch(/from\s*['"]\.\/agenthosts\.js['"]/);
+    const upgraded = patchContainerRunner(withoutImport);
+    expect(upgraded).toContain("const runtime = resolveRuntimeName(session);");
+    // Upgrade path does not re-insert a missing container-import symbol line.
+    expect(upgraded).not.toMatch(/from\s*['"]\.\/agenthosts\.js['"]/);
+  });
+
+  it("emits a sessionio wake-prepare slot in public-exports", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    expect(installed).toContain(
+      "// @nanoclaw-sessionio:wake-prepare-meta-slot",
+    );
+    expect(installed).toContain(
+      "writeDestinations(session.agent_group_id, session.id)",
+    );
+    expect(installed).toContain(
+      "writeSessionRouting(session.agent_group_id, session.id)",
+    );
+    // Ambient stock imports — wake prepare must not installImport these
+    // (would duplicate bindings). Fixture mirrors real container-runner.ts.
+    expect(fixtureSources.containerRunner).toContain(
+      "import { getDb, hasTable } from './db/connection.js';",
+    );
+    expect(fixtureSources.containerRunner).toContain(
+      "import { writeSessionRouting } from './session-manager.js';",
+    );
+    expect(installed).toMatch(/hasTable\(getDb\(\),\s*'agent_destinations'\)/);
+    expect(installed).not.toMatch(
+      /@nanoclaw-agenthosts:connection-import:begin/,
+    );
+  });
+
+  it("preserves sessionio wake-prepare-meta when refreshing public-exports", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate sessionio filling the agenthosts-owned slot (markers may be
+    // unindented — match what sessionio's marked() emits today).
+    const filled = installed.replace(
+      "    // @nanoclaw-sessionio:wake-prepare-meta-slot",
+      `// @nanoclaw-sessionio:wake-prepare-meta:begin
+    { void transport.syncSessionMeta?.(ctx, meta); }
+// @nanoclaw-sessionio:wake-prepare-meta:end`,
+    );
+    expect(filled).toContain("wake-prepare-meta:begin");
+    expect(filled).not.toContain("wake-prepare-meta-slot");
+
+    const refreshed = patchContainerRunner(filled);
+    expect(refreshed).toContain("@nanoclaw-sessionio:wake-prepare-meta:begin");
+    expect(refreshed).toContain("void transport.syncSessionMeta?.(ctx, meta)");
+    expect(refreshed).not.toContain("wake-prepare-meta-slot");
+    // Stale public-exports copy still refreshes around the preserved fill.
+    const stale = refreshed.replace(
+      "falling back to docker map",
+      "OLD_FALLBACK_TEXT",
+    );
+    const upgraded = patchContainerRunner(stale);
+    expect(upgraded).toContain("falling back to docker map");
+    expect(upgraded).toContain("void transport.syncSessionMeta?.(ctx, meta)");
+    expect(patchContainerRunner(upgraded)).toBe(upgraded);
+  });
+
+  it("re-emits wake-prepare slot when public-exports lost it", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withoutSlot = installed.replace(
+      /[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta-slot\r?\n/,
+      "",
+    );
+    expect(withoutSlot).not.toContain("wake-prepare-meta-slot");
+    const refreshed = patchContainerRunner(withoutSlot);
+    expect(refreshed).toContain(
+      "    // @nanoclaw-sessionio:wake-prepare-meta-slot",
+    );
+  });
+
+  it("still extracts wake-prepare when public-exports end appears before begin", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Defensive: first end marker before begin forces region fallback to full source.
+    const corrupted = installed.replace(
+      BEGIN("public-exports"),
+      `${END("public-exports")}\n${BEGIN("public-exports")}`,
+    );
+    const refreshed = patchContainerRunner(corrupted);
+    expect(refreshed).toContain(
+      "    // @nanoclaw-sessionio:wake-prepare-meta-slot",
+    );
+    expect(refreshed).toContain(BEGIN("public-exports"));
+  });
+
   it("keeps sessions-import as a sibling of container-import (not nested)", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     const containerEnd = patched.indexOf(END("container-import"));

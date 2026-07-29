@@ -10,3 +10,5 @@ Uninstall **dependent agenthost plugins first**, then this substrate:
 6. `pnpm run build` and restart the NanoClaw host
 
 After uninstall, all groups fall back to stock Docker wake/kill (no registry). Clear any `container_configs.runtime` / `session_transport` values you no longer need.
+
+`src/warn-once.ts` is shared with `nanoclaw-hosthooks`. Uninstall leaves it in place when `src/hosthooks.ts` is present; otherwise it is removed.

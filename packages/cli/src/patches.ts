@@ -108,6 +108,56 @@ const STOCK_RUNTIME_IMPORT =
 const PATCHED_RUNTIME_IMPORT =
   "import { CONTAINER_RUNTIME_BIN, cleanupOrphans, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';";
 
+const CONTAINER_IMPORT_SYMBOLS = [
+  "registerRuntimeDriver",
+  "resolveRuntimeDriver",
+  "resolveRuntimeName",
+  "setContainerConfigReader",
+  "setSessionTransportResolver",
+] as const;
+
+/**
+ * Widen `./agenthosts.js` import to the current symbol set on upgrade.
+ * Older installs omit resolveRuntimeName / setSessionTransportResolver while
+ * refreshPublicExports already emits bodies that call resolveRuntimeName.
+ *
+ * Scoped to the `@nanoclaw-agenthosts:container-import` marker block so we
+ * never rewrite a user-owned import of the same module path.
+ */
+function widenAgenthostsImport(source: string): string {
+  const startMark = begin("container-import");
+  const endMark = end("container-import");
+  const start = source.indexOf(startMark);
+  const endIdx = source.indexOf(endMark);
+  if (start < 0 || endIdx < 0 || endIdx < start) return source;
+
+  const blockStart = start;
+  const blockEnd = endIdx + endMark.length;
+  const block = source.slice(blockStart, blockEnd);
+  const re = /import\s*\{([^}]*)\}\s*from\s*['"]\.\/agenthosts\.js['"]/;
+  const match = block.match(re);
+  if (!match) return source;
+
+  const current = match[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const missing = CONTAINER_IMPORT_SYMBOLS.filter(
+    (symbol) => !current.includes(symbol),
+  );
+  if (missing.length === 0) return source;
+  const extras = current.filter(
+    (symbol) =>
+      !(CONTAINER_IMPORT_SYMBOLS as readonly string[]).includes(symbol),
+  );
+  const ordered = [...CONTAINER_IMPORT_SYMBOLS, ...extras];
+  const nextBlock = block.replace(
+    re,
+    `import { ${ordered.join(", ")} } from './agenthosts.js';`,
+  );
+  return source.slice(0, blockStart) + nextBlock + source.slice(blockEnd);
+}
+
 export function patchContainerRunner(source: string): string {
   const coreNames = [
     "container-import",
@@ -120,8 +170,9 @@ export function patchContainerRunner(source: string): string {
 
   // Already installed (v1): ensure sibling imports + refresh public-exports body.
   if (coreNames.every((name) => source.includes(begin(name)))) {
-    let content = installImport(
-      source,
+    let content = widenAgenthostsImport(source);
+    content = installImport(
+      content,
       "./db/sessions.js",
       ["getSession"],
       "sessions-import",
@@ -146,13 +197,7 @@ export function patchContainerRunner(source: string): string {
   let content = installImport(
     source,
     "./agenthosts.js",
-    [
-      "registerRuntimeDriver",
-      "resolveRuntimeDriver",
-      "resolveRuntimeName",
-      "setContainerConfigReader",
-      "setSessionTransportResolver",
-    ],
+    [...CONTAINER_IMPORT_SYMBOLS],
     "container-import",
   );
 
@@ -258,8 +303,41 @@ registerRuntimeDriver('docker', {
   return content;
 }
 
-function publicExportsBody(): string {
-  return `export function isContainerRunning(sessionId: string): boolean {
+/** Empty slot owned by agenthosts; sessionio replaces it with wake-prepare-meta. */
+const SESSIONIO_WAKE_PREPARE_SLOT =
+  "    // @nanoclaw-sessionio:wake-prepare-meta-slot";
+
+/**
+ * Keep sessionio's filled wake-prepare-meta (or the empty slot) when refreshing
+ * public-exports. Without this, every agenthosts upgrade/verify wipes the fill
+ * and verify fails with "missing agenthosts call sites" after sessionio install.
+ */
+function extractWakePrepareFragment(source: string): string {
+  const regionStart = source.indexOf(begin("public-exports"));
+  const regionEndMarker = end("public-exports");
+  const regionEnd = source.indexOf(regionEndMarker);
+  const region =
+    regionStart >= 0 && regionEnd > regionStart
+      ? source.slice(regionStart, regionEnd)
+      : source;
+
+  const filled = region.match(
+    /^[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta:begin\r?\n[\s\S]*?^[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta:end(?=\r?\n)/m,
+  );
+  if (filled) return filled[0];
+
+  const slot = region.match(
+    /^[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta-slot(?=\r?\n)/m,
+  );
+  if (slot) return slot[0];
+
+  return SESSIONIO_WAKE_PREPARE_SLOT;
+}
+
+function publicExportsBody(
+  wakePrepareFragment: string = SESSIONIO_WAKE_PREPARE_SLOT,
+): string {
+  const body = `export function isContainerRunning(sessionId: string): boolean {
   const session = getSession(sessionId);
   if (!session) return isContainerRunningDocker(sessionId);
   const runtime = resolveRuntimeName(session);
@@ -280,6 +358,23 @@ function publicExportsBody(): string {
 export async function wakeContainer(session: Session): Promise<boolean> {
   const runtime = resolveRuntimeName(session);
   try {
+    // Project destinations/routing before ANY runtime wake (docker, process, …).
+    // spawnContainer (docker) already does the same projection; calling it here too
+    // is intentional and idempotent (replaceDestinations + routing upsert) so
+    // process/other drivers cannot skip it and wake with an empty destinations map.
+    //
+    // Ambient free identifiers — already present in stock container-runner.ts:
+    //   hasTable/getDb  → import from './db/connection.js' (spawnContainer's
+    //                     writeDestinations gate uses the identical call)
+    //   writeSessionRouting → import from './session-manager.js' (sessionio's
+    //                     container-runner-meta patch also anchors on this call)
+    // Do not installImport them: a second binding would duplicate stock imports and break tsc.
+    if (hasTable(getDb(), 'agent_destinations')) {
+      const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
+      writeDestinations(session.agent_group_id, session.id);
+    }
+    writeSessionRouting(session.agent_group_id, session.id);
+    // @nanoclaw-sessionio:wake-prepare-meta-slot
     return await resolveRuntimeDriver(session).wake(session, {});
   } catch (err) {
     if (runtime === 'docker') {
@@ -311,6 +406,9 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
     throw err;
   }
 }`;
+  // Filled sessionio blocks may use different marker indentation; substitute whole.
+  if (wakePrepareFragment === SESSIONIO_WAKE_PREPARE_SLOT) return body;
+  return body.replace(SESSIONIO_WAKE_PREPARE_SLOT, wakePrepareFragment);
 }
 
 function refreshPublicExports(source: string): string {
@@ -329,7 +427,10 @@ function refreshPublicExports(source: string): string {
   const cut = afterEnd + trailingNewline + trailingCr;
   return (
     source.slice(0, start) +
-    marked("public-exports", publicExportsBody()) +
+    marked(
+      "public-exports",
+      publicExportsBody(extractWakePrepareFragment(source)),
+    ) +
     "\n" +
     source.slice(cut)
   );
