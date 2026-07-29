@@ -120,11 +120,24 @@ const CONTAINER_IMPORT_SYMBOLS = [
  * Widen `./agenthosts.js` import to the current symbol set on upgrade.
  * Older installs omit resolveRuntimeName / setSessionTransportResolver while
  * refreshPublicExports already emits bodies that call resolveRuntimeName.
+ *
+ * Scoped to the `@nanoclaw-agenthosts:container-import` marker block so we
+ * never rewrite a user-owned import of the same module path.
  */
 function widenAgenthostsImport(source: string): string {
-  const re = /import \{([^}]+)\} from '\.\/agenthosts\.js';/;
-  const match = source.match(re);
+  const startMark = begin("container-import");
+  const endMark = end("container-import");
+  const start = source.indexOf(startMark);
+  const endIdx = source.indexOf(endMark);
+  if (start < 0 || endIdx < 0 || endIdx < start) return source;
+
+  const blockStart = start;
+  const blockEnd = endIdx + endMark.length;
+  const block = source.slice(blockStart, blockEnd);
+  const re = /import\s*\{([^}]*)\}\s*from\s*['"]\.\/agenthosts\.js['"]/;
+  const match = block.match(re);
   if (!match) return source;
+
   const current = match[1]
     .split(",")
     .map((s) => s.trim())
@@ -138,10 +151,11 @@ function widenAgenthostsImport(source: string): string {
       !(CONTAINER_IMPORT_SYMBOLS as readonly string[]).includes(symbol),
   );
   const ordered = [...CONTAINER_IMPORT_SYMBOLS, ...extras];
-  return source.replace(
+  const nextBlock = block.replace(
     re,
     `import { ${ordered.join(", ")} } from './agenthosts.js';`,
   );
+  return source.slice(0, blockStart) + nextBlock + source.slice(blockEnd);
 }
 
 export function patchContainerRunner(source: string): string {
@@ -319,8 +333,7 @@ export async function wakeContainer(session: Session): Promise<boolean> {
       writeDestinations(session.agent_group_id, session.id);
     }
     writeSessionRouting(session.agent_group_id, session.id);
-    // @nanoclaw-sessionio:wake-prepare-meta:begin
-    // @nanoclaw-sessionio:wake-prepare-meta:end
+    // @nanoclaw-sessionio:wake-prepare-meta-slot
     return await resolveRuntimeDriver(session).wake(session, {});
   } catch (err) {
     if (runtime === 'docker') {
