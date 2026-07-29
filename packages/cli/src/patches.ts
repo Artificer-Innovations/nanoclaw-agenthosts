@@ -425,10 +425,12 @@ export function unpatchIndex(source: string): string {
     );
   }
   // Restore cleanupOrphans on the container-runtime import when the call is back.
+  // patchIndex may have dropped the whole import when cleanupOrphans was its only
+  // symbol — synthesize a fresh import in that case so uninstall is runnable.
   if (content.includes("cleanupOrphans();")) {
-    content = content.replace(
-      /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
-      (match, symbols: string) => {
+    const importRe = /import \{([^}]+)\} from '\.\/container-runtime\.js';/;
+    if (importRe.test(content)) {
+      content = content.replace(importRe, (match, symbols: string) => {
         const parts = symbols
           .split(",")
           .map((s) => s.trim())
@@ -438,8 +440,15 @@ export function unpatchIndex(source: string): string {
         if (ensureIdx >= 0) parts.splice(ensureIdx + 1, 0, "cleanupOrphans");
         else parts.push("cleanupOrphans");
         return `import { ${parts.join(", ")} } from './container-runtime.js';`;
-      },
-    );
+      });
+    } else {
+      const stmt = `import { cleanupOrphans } from './container-runtime.js';\n`;
+      const firstImport = content.search(/^import /m);
+      content =
+        firstImport >= 0
+          ? content.slice(0, firstImport) + stmt + content.slice(firstImport)
+          : stmt + content;
+    }
   }
   return content;
 }

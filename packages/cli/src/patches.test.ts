@@ -202,6 +202,40 @@ async function main(): Promise<void> {
     expect(patched).not.toMatch(/import \{\s*\} from/);
   });
 
+  it("round-trips when the dropped import must be synthesized on uninstall", () => {
+    const source = `import { cleanupOrphans } from './container-runtime.js';
+
+async function main(): Promise<void> {
+  ensureContainerRuntimeRunning();
+  cleanupOrphans();
+}
+`;
+    const patched = patchIndex(source);
+    expect(patched).not.toContain("from './container-runtime.js'");
+    const restored = unpatchIndex(patched);
+    expect(restored).toContain("cleanupOrphans();");
+    expect(restored).toContain(
+      "import { cleanupOrphans } from './container-runtime.js';",
+    );
+    expect(restored).not.toContain("@nanoclaw-agenthosts:");
+  });
+
+  it("synthesizes cleanupOrphans import ahead of remaining imports on uninstall", () => {
+    const source = `import { log } from './log.js';
+import { cleanupOrphans } from './container-runtime.js';
+
+async function main(): Promise<void> {
+  ensureContainerRuntimeRunning();
+  cleanupOrphans();
+}
+`;
+    const restored = unpatchIndex(patchIndex(source));
+    expect(restored.indexOf("import { cleanupOrphans }")).toBeLessThan(
+      restored.indexOf("import { log }"),
+    );
+    expect(restored).toContain("cleanupOrphans();");
+  });
+
   it("keeps existing cleanupOrphans import on uninstall when already present", () => {
     const patched = `import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 // @nanoclaw-agenthosts:index-import:begin
