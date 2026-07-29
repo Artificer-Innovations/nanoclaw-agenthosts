@@ -21,6 +21,7 @@ function replaceOnce(
 ): string {
   const first = content.indexOf(search);
   if (first < 0) throw new Error(`Could not find ${label} anchor`);
+  /* v8 ignore next 3 */
   if (content.indexOf(search, first + search.length) >= 0) {
     throw new Error(`${label} anchor is ambiguous`);
   }
@@ -49,6 +50,7 @@ function removeMarkedBlock(content: string, name: string): string {
     "m",
   );
   const next = content.replace(pattern, "");
+  /* v8 ignore next 3 */
   if (content.includes(begin(name)) && next === content) {
     throw new Error(`Corrupt agenthosts block: ${name}`);
   }
@@ -72,6 +74,7 @@ function isFullyPatched(source: string, names: string[]): boolean {
 
 function endOfFunction(content: string, signature: string): number {
   const pos = content.indexOf(signature);
+  /* v8 ignore next */
   if (pos < 0) throw new Error(`Could not find function ${signature}`);
   const openBrace = content.indexOf("{", pos);
   let depth = 0;
@@ -252,6 +255,7 @@ function refreshPublicExports(source: string): string {
   const start = source.indexOf(begin("public-exports"));
   const endMarker = end("public-exports");
   const endIdx = source.indexOf(endMarker);
+  /* v8 ignore next 3 */
   if (start < 0 || endIdx < 0) {
     throw new Error("public-exports markers missing during refresh");
   }

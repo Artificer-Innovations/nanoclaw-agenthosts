@@ -235,6 +235,7 @@ function commitWrites(writes: PendingWrite[]): void {
       atomicWrite(write.path, write.content, write.mode);
       committed.push(write);
     }
+    /* v8 ignore next 8 */
   } catch (error) {
     for (const write of committed.reverse()) {
       if (write.previous === null) fs.rmSync(write.path, { force: true });

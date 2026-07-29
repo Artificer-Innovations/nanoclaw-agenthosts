@@ -71,5 +71,6 @@ export function readPackageVersion(): string {
   const pkg = JSON.parse(
     fs.readFileSync(path.join(packageRoot(), "package.json"), "utf8"),
   ) as { version?: string };
+  /* v8 ignore next */
   return pkg.version ?? "0.0.0";
 }

@@ -29,9 +29,9 @@ jobs:
         run: |
           pnpm run typecheck
           pnpm run lint
-          pnpm run test:unit
           pnpm run test:coverage
           pnpm run build
+          pnpm run test:integration
       - name: Read version
         id: version
         run: echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"

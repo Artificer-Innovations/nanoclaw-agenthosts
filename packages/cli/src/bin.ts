@@ -80,24 +80,21 @@ Commands:
   }
 }
 
-export function isCliEntry(
-  metaUrl: string,
-  argv1: string | undefined,
-): boolean {
-  if (!argv1) return false;
+export function isCliEntry(entryPath: string, argv: string[]): boolean {
+  if (!argv[1]) return false;
   try {
-    return (
-      realpathSync(fileURLToPath(metaUrl)) === realpathSync(path.resolve(argv1))
-    );
+    return realpathSync(entryPath) === realpathSync(path.resolve(argv[1]));
   } catch {
-    return false;
+    return entryPath === argv[1];
   }
 }
 
-export function main(argv: string[] = process.argv): number {
-  return runCommand(argv);
+export function main(): void {
+  process.exit(runCommand(process.argv));
 }
 
-if (isCliEntry(import.meta.url, process.argv[1])) {
-  process.exitCode = main();
+/* v8 ignore start */
+if (isCliEntry(fileURLToPath(import.meta.url), process.argv)) {
+  main();
 }
+/* v8 ignore stop */

@@ -1,7 +1,7 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   runInstall,
   runUninstall,
@@ -11,6 +11,8 @@ import {
 } from "./install.js";
 import { findNanoclawRoot, packageRoot } from "./paths.js";
 import { writeFixtureTree } from "./test-fixtures.js";
+import * as paths from "./paths.js";
+import { FILE_TRANSFORMS } from "./patches.js";
 
 const temps: string[] = [];
 
@@ -24,9 +26,10 @@ afterEach(() => {
   for (const dir of temps.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+  vi.restoreAllMocks();
 });
 
-describe("paths", () => {
+describe("paths (fixture)", () => {
   it("finds package root and nanoclaw fixture root", () => {
     expect(packageRoot()).toContain("nanoclaw-agenthosts");
     const root = tempRoot();
@@ -64,6 +67,11 @@ describe("install / verify / uninstall", () => {
     );
     expect(runner).toContain("@nanoclaw-hosthooks:container-import:begin");
     expect(runner).toContain("registerRuntimeDriver");
+    // Smoke-bug coverage: optional runtime fields + getSession public exports.
+    expect(runner).toContain("getSession");
+    expect(fs.readFileSync(path.join(root, "src/types.ts"), "utf8")).toContain(
+      "runtime?: string | null",
+    );
 
     const removed = runUninstall(root);
     expect(removed.removed).toContain("src/agenthosts.ts");
@@ -83,13 +91,78 @@ describe("install / verify / uninstall", () => {
   it("rolls back when a later transform fails", () => {
     const root = tempRoot();
     writeFixtureTree(root, fs, path);
-    // Break groups.ts create anchor so patchGroupsCli fails after earlier files staged.
     fs.writeFileSync(
       path.join(root, "src/cli/resources/groups.ts"),
       "export {};\n",
     );
     expect(() => runInstall(root)).toThrow();
     expect(fs.existsSync(path.join(root, "src/agenthosts.ts"))).toBe(false);
+  });
+
+  it("throws when a required host file is missing", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    fs.rmSync(path.join(root, "src/index.ts"));
+    expect(() => runInstall(root)).toThrow(/Missing required host file/);
+  });
+
+  it("reports missing files and invalid transforms during verify", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    runInstall(root);
+    fs.rmSync(path.join(root, "src/agenthosts.ts"));
+    fs.writeFileSync(
+      path.join(root, "src/cli/resources/groups.ts"),
+      "// @nanoclaw-agenthosts:groups-present-config:begin\nbroken\n",
+    );
+    const result = runVerify(root);
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((issue) => issue.includes("missing"))).toBe(true);
+    expect(
+      result.issues.some((issue) => issue.includes("invalid agenthosts")),
+    ).toBe(true);
+  });
+
+  it("verify reports missing transform targets", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    fs.rmSync(path.join(root, "src/types.ts"));
+    const result = runVerify(root);
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContain("missing src/types.ts");
+  });
+
+  it("uninstall skips missing transform files", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    runInstall(root);
+    fs.rmSync(path.join(root, "src/index.ts"));
+    const result = runUninstall(root);
+    expect(result.root).toBe(root);
+  });
+
+  it("throws when bundled resource is missing", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    const empty = tempRoot();
+    fs.mkdirSync(empty, { recursive: true });
+    vi.spyOn(paths, "hostResourcesDir").mockReturnValue(empty);
+    expect(() => runInstall(root)).toThrow(/Missing bundled resource/);
+  });
+
+  it("syncSkillToFork replaces file destinations and clears prior contents", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    const skillPath = path.join(root, ".claude/skills/add-agenthosts");
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, "not-a-dir");
+    syncSkillToFork(root);
+    expect(fs.statSync(skillPath).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(skillPath, "SKILL.md"))).toBe(true);
+
+    fs.writeFileSync(path.join(skillPath, "stale.txt"), "stale");
+    syncSkillToFork(root);
+    expect(fs.existsSync(path.join(skillPath, "stale.txt"))).toBe(false);
   });
 
   it("syncSkillToFork replaces symlink destinations safely", () => {
@@ -105,5 +178,38 @@ describe("install / verify / uninstall", () => {
     expect(fs.lstatSync(skillLink).isSymbolicLink()).toBe(false);
     expect(fs.existsSync(path.join(elsewhere, "keep.txt"))).toBe(true);
     expect(fs.existsSync(path.join(skillLink, "SKILL.md"))).toBe(true);
+  });
+
+  it("runInstall/verify/uninstall without --path use cwd NanoClaw root", () => {
+    const root = fs.realpathSync(tempRoot());
+    writeFixtureTree(root, fs, path);
+    const cwd = process.cwd();
+    process.chdir(root);
+    try {
+      expect(fs.realpathSync(runInstall().root)).toBe(root);
+      expect(runVerify().ok).toBe(true);
+      fs.unlinkSync(path.join(root, "src/index.ts"));
+      const removed = runUninstall();
+      expect(fs.realpathSync(removed.root)).toBe(root);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  it("verify catch stringifies non-Error throws from transforms", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    const target = FILE_TRANSFORMS.find((f) => f.path === "src/index.ts")!;
+    const original = target.transform;
+    target.transform = () => {
+      throw "index-boom";
+    };
+    try {
+      const verify = runVerify(root);
+      expect(verify.ok).toBe(false);
+      expect(verify.issues.some((i) => i.includes("index-boom"))).toBe(true);
+    } finally {
+      target.transform = original;
+    }
   });
 });

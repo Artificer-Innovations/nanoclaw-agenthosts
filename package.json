@@ -35,10 +35,11 @@
   "scripts": {
     "build": "pnpm --filter @nanoclaw-agenthosts/shared build && pnpm --filter @nanoclaw-agenthosts/host build && pnpm --filter @nanoclaw-agenthosts/cli build && node scripts/sync-resources.mjs && prettier --write skills/add-agenthosts/resources/host >/dev/null && node scripts/verify-publish-entry.mjs",
     "typecheck": "pnpm --filter @nanoclaw-agenthosts/shared --filter @nanoclaw-agenthosts/host --filter @nanoclaw-agenthosts/cli typecheck",
+    "lint": "prettier --check \"**/*.{ts,js,mjs,json,md,yml,yaml}\" --ignore-path .prettierignore",
+    "lint:fix": "prettier --write \"**/*.{ts,js,mjs,json,md,yml,yaml}\" --ignore-path .prettierignore",
     "test:unit": "pnpm -r test:unit",
-    "test:coverage": "pnpm --filter @nanoclaw-agenthosts/cli test:coverage",
+    "test:coverage": "pnpm --filter @nanoclaw-agenthosts/host --filter @nanoclaw-agenthosts/cli test:coverage",
     "test:integration": "node scripts/run-integration.mjs",
-    "lint": "prettier --check .",
     "changeset": "changeset",
     "version": "changeset version",
     "release:publish": "npm publish --provenance --access public",

@@ -1,7 +1,4 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   patchContainerConfigsDb,
   patchContainerRunner,
@@ -18,6 +15,9 @@ import {
 } from "./patches.js";
 import { fixtureSources } from "./test-fixtures.js";
 
+const BEGIN = (name: string) => `// @nanoclaw-agenthosts:${name}:begin`;
+const END = (name: string) => `// @nanoclaw-agenthosts:${name}:end`;
+
 describe("patchContainerRunner", () => {
   it("is idempotent and preserves hosthooks markers", () => {
     const once = patchContainerRunner(fixtureSources.containerRunner);
@@ -26,7 +26,56 @@ describe("patchContainerRunner", () => {
     expect(once).toContain("function wakeContainerDocker");
     expect(once).toContain("registerRuntimeDriver");
     expect(once).toContain("export function wakeContainer");
+    expect(once).toContain("getSession");
     expect(patchContainerRunner(once)).toBe(once);
+  });
+
+  it("refreshes public-exports on already-installed trees (upgrade path)", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const stale = installed.replace(
+      "falling back to docker map",
+      "OLD_FALLBACK_TEXT",
+    );
+    const refreshed = patchContainerRunner(stale);
+    expect(refreshed).toContain("falling back to docker map");
+    expect(refreshed).not.toContain("OLD_FALLBACK_TEXT");
+  });
+
+  it("handles CRLF line endings when refreshing public-exports", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const crlf = installed.replaceAll("\n", "\r\n");
+    const refreshed = patchContainerRunner(crlf);
+    expect(refreshed).toContain("resolveRuntimeDriver(session)");
+  });
+
+  it("refreshes public-exports when end marker has no trailing newline", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const endMarker = END("public-exports");
+    const endIdx = installed.indexOf(endMarker);
+    const withoutTrailing = `${installed.slice(0, endIdx + endMarker.length)}TAIL`;
+    const refreshed = patchContainerRunner(withoutTrailing);
+    expect(refreshed).toContain("resolveRuntimeDriver(session)");
+    expect(refreshed).toContain("TAIL");
+  });
+
+  it("accepts trees that already import cleanupOrphans", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN, cleanupOrphans, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+    );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain("cleanupOrphans");
+    expect(patched).toContain("registerRuntimeDriver('docker'");
+  });
+
+  it("throws when container-runtime import cannot gain cleanupOrphans", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './other.js';",
+    );
+    expect(() => patchContainerRunner(source)).toThrow(
+      /Could not find container-runtime import/,
+    );
   });
 
   it("uninstall restores stock exports", () => {
@@ -37,6 +86,25 @@ describe("patchContainerRunner", () => {
     );
     expect(restored).not.toContain("@nanoclaw-agenthosts:");
     expect(restored).toContain("@nanoclaw-hosthooks:container-import:begin");
+  });
+
+  it("throws on unbalanced braces for rename targets", () => {
+    const broken = fixtureSources.containerRunner.replace(
+      `export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
+  const entry = activeContainers.get(sessionId);
+  if (!entry) return;
+  if (onExit) entry.process.once('close', onExit);
+  try {
+    stopContainer(entry.containerName);
+  } catch {
+    entry.process.kill('SIGKILL');
+  }
+}`,
+      `export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
+  const entry = activeContainers.get(sessionId);
+`,
+    );
+    expect(() => patchContainerRunner(broken)).toThrow(/Unbalanced braces/);
   });
 });
 
@@ -49,10 +117,22 @@ describe("patchIndex", () => {
     expect(restored).toContain("cleanupOrphans();");
     expect(restored).not.toContain("@nanoclaw-agenthosts:");
   });
+
+  it("restores cleanupOrphans when stock call is missing after uninstall", () => {
+    const source = `import { ensureContainerRuntimeRunning } from './container-runtime.js';
+
+async function main(): Promise<void> {
+  ensureContainerRuntimeRunning();
+  log.info('ready');
+}
+`;
+    const restored = unpatchIndex(source);
+    expect(restored).toContain("cleanupOrphans();");
+  });
 });
 
 describe("patchTypes / db / migrations / groups", () => {
-  it("adds runtime fields and restores on uninstall", () => {
+  it("adds optional runtime fields (smoke-bug: required fields break backfill)", () => {
     const patched = patchTypes(fixtureSources.types);
     expect(patched).toContain("runtime?: string | null");
     expect(patched).toContain("session_transport?: string | null");
@@ -61,10 +141,38 @@ describe("patchTypes / db / migrations / groups", () => {
     );
   });
 
+  it("upgrades older required runtime fields to optional", () => {
+    const required = fixtureSources.types.replace(
+      "  cli_scope: string; // 'disabled' | 'group' | 'global'\n  updated_at: string;\n}",
+      `${BEGIN("types-runtime-fields")}
+  cli_scope: string; // 'disabled' | 'group' | 'global'
+  /** Agenthosts runtime driver name (docker | process | fly | …). Null = instance default. */
+  runtime: string | null;
+  /** Optional session transport (filesystem | http). Null = filesystem / sessionio default. */
+  session_transport: string | null;
+  updated_at: string;
+}
+${END("types-runtime-fields")}`,
+    );
+    const upgraded = patchTypes(required);
+    expect(upgraded).toContain("runtime?: string | null");
+    expect(upgraded).toContain("session_transport?: string | null");
+    expect(unpatchTypes(required)).toContain(
+      "cli_scope: string; // 'disabled' | 'group' | 'global'\n  updated_at: string;",
+    );
+  });
+
+  it("unpatchTypes falls back to removeMarkedBlock for unknown bodies", () => {
+    const odd = `${BEGIN("types-runtime-fields")}\n  runtime: 'weird';\n${END("types-runtime-fields")}\n`;
+    expect(unpatchTypes(odd)).toBe("");
+    expect(unpatchTypes("no markers")).toBe("no markers");
+  });
+
   it("extends SCALAR_COLUMNS", () => {
     const patched = patchContainerConfigsDb(fixtureSources.containerConfigs);
     expect(patched).toContain("'runtime'");
     expect(patched).toContain("'session_transport'");
+    expect(patchContainerConfigsDb(patched)).toBe(patched);
     const restored = unpatchContainerConfigsDb(patched);
     expect(restored).toContain("'cli_scope',\n]);");
     expect(restored).not.toContain("'runtime'");
@@ -74,6 +182,7 @@ describe("patchTypes / db / migrations / groups", () => {
     const patched = patchMigrationsIndex(fixtureSources.migrationsIndex);
     expect(patched).toContain("from './020-agenthosts-runtime.js'");
     expect(patched).toContain("migration020");
+    expect(patchMigrationsIndex(patched)).toBe(patched);
     expect(unpatchMigrationsIndex(patched)).not.toContain("migration020");
   });
 
@@ -90,13 +199,25 @@ describe("patchTypes / db / migrations / groups", () => {
   });
 });
 
-describe("partial markers", () => {
+describe("partial markers and anchors", () => {
   it("throws on partial container-runner markers", () => {
     const partial =
       fixtureSources.containerRunner +
-      "\n// @nanoclaw-agenthosts:container-import:begin\nimport { resolveRuntimeDriver } from './agenthosts.js';\n// @nanoclaw-agenthosts:container-import:end\n";
+      `\n${BEGIN("container-import")}\nimport { resolveRuntimeDriver } from './agenthosts.js';\n${END("container-import")}\n`;
     expect(() => patchContainerRunner(partial)).toThrow(
       /Partial agenthosts markers/,
+    );
+  });
+
+  it("throws when import anchors are missing", () => {
+    expect(() =>
+      patchIndex("export function main() { cleanupOrphans(); }\n"),
+    ).toThrow(/Could not find import anchor/);
+  });
+
+  it("throws when anchors are missing", () => {
+    expect(() => patchTypes("export interface ContainerConfigRow {}")).toThrow(
+      /Could not find ContainerConfigRow fields/,
     );
   });
 });

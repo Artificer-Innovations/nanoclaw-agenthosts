@@ -1,8 +1,21 @@
 # nanoclaw-agenthosts
 
-Pluggable **agent process lifecycle** for NanoClaw: wake / kill / isRunning / orphans via a `RuntimeDriver` registry, with today’s Docker behavior as the default.
+**Decouple where NanoClaw’s host runs from where each agent runs.**
 
-One NanoClaw instance can register many runtimes (`docker`, `process`, `applenative`, `fly`, …). Each agent group selects one via `container_configs.runtime` (same mental model as `provider`).
+By default NanoClaw assumes the host and every agent share one Docker-shaped machine: the host wakes a local container, talks over the filesystem mailbox, and kills that same process. This package turns that lifecycle into a pluggable `RuntimeDriver` registry so the host can stay on one machine (or one orchestration style) while individual agent groups run elsewhere—another container runtime, a sibling process on the same box, or a remote machine that the host only reaches over the network.
+
+The host still owns routing, sessions, and group config. Drivers own **wake / kill / isRunning / orphan cleanup** for a given runtime. Docker remains the zero-behavior-change default when `container_configs.runtime` is unset.
+
+## Why this exists
+
+Useful when you want to:
+
+- **Mix runtimes in one NanoClaw instance** — some groups stay on Docker; others use a lighter local process, a different container stack, or a remote executor, selected per group the same way you pick a model `provider`.
+- **Keep the host stable while agents move** — upgrade or relocate agent sandboxes without rewriting host wake/kill call sites; plugins register drivers, the substrate dispatches.
+- **Split host and agent onto different machines** — pair a non-local driver with a session transport (e.g. via `nanoclaw-sessionio`) so mailbox I/O is not tied to a shared filesystem.
+- **Prototype new agent hosts quickly** — implement `RuntimeDriver`, register it, set `--runtime` on a group.
+
+**Proof of concept:** [`nanoclaw-agenthost-process`](https://github.com/Artificer-Innovations/nanoclaw-agenthost-process) runs the agent as a local child process instead of a Docker container. Install agenthosts first, then that plugin; point a group at `--runtime process` to exercise the registry end-to-end without changing Docker groups.
 
 ## Quick start
 
@@ -26,10 +39,10 @@ pnpm exec nanoclaw-agenthosts verify
 
 ```bash
 ncl groups config update --id <ag> --runtime process
-ncl groups create --name "Fly scout" --folder fly-scout --runtime fly
+ncl groups create --name "Local process scout" --folder process-scout --runtime process
 ```
 
-Default when unset: `docker` (or `NANOCLAW_DEFAULT_RUNTIME`).
+Default when unset: `docker` (or `NANOCLAW_DEFAULT_RUNTIME`). Install the matching agenthost plugin before selecting a non-docker runtime.
 
 ## Development
 

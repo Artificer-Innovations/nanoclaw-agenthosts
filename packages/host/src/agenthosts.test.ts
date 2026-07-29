@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getAgenthostsCapabilities,
+  listRegisteredRuntimes,
   probeAgenthostsCapabilities,
   registerRuntimeDriver,
   resetAgenthostsForTests,
@@ -13,7 +14,8 @@ import {
   type RuntimeDriver,
   type SessionRef,
 } from "./agenthosts.js";
-import { resetWarnOnceForTests } from "./warn-once.js";
+import { migration020 } from "./020-agenthosts-runtime.js";
+import { resetWarnOnceForTests, warnOnce } from "./warn-once.js";
 
 function stubDriver(overrides: Partial<RuntimeDriver> = {}): RuntimeDriver {
   return {
@@ -39,6 +41,12 @@ describe("registerRuntimeDriver / resolveRuntimeDriver", () => {
     expect(resolveRuntimeDriver(session)).toBe(docker);
   });
 
+  it("rejects empty driver names", () => {
+    expect(() => registerRuntimeDriver("  ", stubDriver())).toThrow(
+      /non-empty/,
+    );
+  });
+
   it("prefers container_configs.runtime over env default", () => {
     process.env.NANOCLAW_DEFAULT_RUNTIME = "docker";
     setContainerConfigReader(() => ({ runtime: "process" }));
@@ -55,6 +63,12 @@ describe("registerRuntimeDriver / resolveRuntimeDriver", () => {
     const processDriver = stubDriver();
     registerRuntimeDriver("process", processDriver);
     expect(resolveRuntimeName(session)).toBe("process");
+  });
+
+  it("treats whitespace-only runtime as unset", () => {
+    setContainerConfigReader(() => ({ runtime: "   " }));
+    registerRuntimeDriver("docker", stubDriver());
+    expect(resolveRuntimeName(session)).toBe("docker");
   });
 
   it("selects per agent group without affecting others", () => {
@@ -91,20 +105,39 @@ describe("registerRuntimeDriver / resolveRuntimeDriver", () => {
     );
   });
 
-  it("allows matching requiredTransport", () => {
-    const fly = stubDriver({ requiredTransport: "http" });
+  it("fails closed when requiredTransport is an array of alternatives", () => {
+    registerRuntimeDriver(
+      "fly",
+      stubDriver({ requiredTransport: ["http", "grpc"] }),
+    );
+    setContainerConfigReader(() => ({
+      runtime: "fly",
+      session_transport: "filesystem",
+    }));
+    expect(() => resolveRuntimeDriver(session)).toThrow(
+      /requires session transport "http\|grpc"/,
+    );
+  });
+
+  it("allows matching requiredTransport string or array", () => {
+    const fly = stubDriver({ requiredTransport: ["http", "grpc"] });
     registerRuntimeDriver("fly", fly);
     setContainerConfigReader(() => ({
       runtime: "fly",
-      session_transport: "http",
+      session_transport: "grpc",
     }));
     expect(resolveRuntimeDriver(session)).toBe(fly);
   });
 
-  it("unregister removes a driver", () => {
-    const docker = stubDriver();
-    const unregister = registerRuntimeDriver("docker", docker);
-    unregister();
+  it("unregister removes only the registered instance", () => {
+    const first = stubDriver();
+    const second = stubDriver();
+    const unregisterFirst = registerRuntimeDriver("docker", first);
+    registerRuntimeDriver("docker", second);
+    unregisterFirst();
+    expect(resolveRuntimeDriver(session)).toBe(second);
+    const unregisterSecond = registerRuntimeDriver("docker", second);
+    unregisterSecond();
     expect(() => resolveRuntimeDriver(session)).toThrow(/docker/);
   });
 });
@@ -114,10 +147,25 @@ describe("session transport resolution", () => {
     expect(resolveSessionTransportName(session)).toBe("filesystem");
   });
 
+  it("reads session_transport from container config when no resolver", () => {
+    setContainerConfigReader(() => ({ session_transport: "http" }));
+    expect(resolveSessionTransportName(session)).toBe("http");
+  });
+
   it("prefers sessionio resolver when set", () => {
     setSessionTransportResolver(() => "http");
     setContainerConfigReader(() => ({ session_transport: "filesystem" }));
     expect(resolveSessionTransportName(session)).toBe("http");
+  });
+
+  it("clears injectable resolvers", () => {
+    setContainerConfigReader(() => ({ runtime: "process" }));
+    setSessionTransportResolver(() => "http");
+    setContainerConfigReader(null);
+    setSessionTransportResolver(null);
+    registerRuntimeDriver("docker", stubDriver());
+    expect(resolveRuntimeName(session)).toBe("docker");
+    expect(resolveSessionTransportName(session)).toBe("filesystem");
   });
 });
 
@@ -157,6 +205,7 @@ describe("capabilities", () => {
     expect(caps.apiVersion).toBe(1);
     expect(caps.counts.drivers).toBe(1);
     expect(caps.runtimes).toEqual(["docker"]);
+    expect(listRegisteredRuntimes()).toEqual(["docker"]);
   });
 
   it("probe reports present / absent", () => {
@@ -170,10 +219,69 @@ describe("capabilities", () => {
       present: false,
       reason: "absent",
     });
+    expect(probeAgenthostsCapabilities(() => null)).toEqual({
+      present: false,
+      reason: "absent",
+    });
     expect(
       probeAgenthostsCapabilities(() => {
         throw new Error("nope");
       }),
     ).toMatchObject({ present: false, reason: "error" });
+  });
+});
+
+describe("warnOnce", () => {
+  it("emits once per key with and without an error", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    warnOnce("k1", "hello");
+    warnOnce("k1", "hello again");
+    warnOnce("k2", "with err", new Error("x"));
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+});
+
+describe("migration020", () => {
+  it("adds runtime and session_transport when absent", () => {
+    const statements: string[] = [];
+    const db = {
+      prepare(sql: string) {
+        statements.push(sql);
+        return {
+          all: () => [{ name: "id" }, { name: "provider" }],
+          run: () => undefined,
+        };
+      },
+    };
+    migration020.up(db);
+    expect(migration020.version).toBe(20);
+    expect(migration020.name).toBe("agenthosts-runtime");
+    expect(statements).toContain(
+      "ALTER TABLE container_configs ADD COLUMN runtime TEXT",
+    );
+    expect(statements).toContain(
+      "ALTER TABLE container_configs ADD COLUMN session_transport TEXT",
+    );
+  });
+
+  it("is a no-op when columns already exist", () => {
+    const alters: string[] = [];
+    const db = {
+      prepare(sql: string) {
+        return {
+          all: () => [
+            { name: "runtime" },
+            { name: "session_transport" },
+            { name: "id" },
+          ],
+          run: () => {
+            alters.push(sql);
+          },
+        };
+      },
+    };
+    migration020.up(db);
+    expect(alters).toEqual([]);
   });
 });
