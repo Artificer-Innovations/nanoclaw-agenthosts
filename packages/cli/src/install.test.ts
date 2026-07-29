@@ -88,6 +88,34 @@ describe("install / verify / uninstall", () => {
     expect(stockRunner).not.toContain("@nanoclaw-agenthosts:");
   });
 
+  it("preserves warn-once.ts on uninstall when hosthooks is present", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    runInstall(root);
+    fs.writeFileSync(
+      path.join(root, "src/hosthooks.ts"),
+      "export const HOSTHOOKS_API_VERSION = 1;\n",
+    );
+    expect(fs.existsSync(path.join(root, "src/warn-once.ts"))).toBe(true);
+
+    const removed = runUninstall(root);
+    expect(removed.removed).toContain("src/agenthosts.ts");
+    expect(removed.removed).not.toContain("src/warn-once.ts");
+    expect(fs.existsSync(path.join(root, "src/warn-once.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "src/agenthosts.ts"))).toBe(false);
+  });
+
+  it("removes warn-once.ts on uninstall when hosthooks is absent", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    runInstall(root);
+    expect(fs.existsSync(path.join(root, "src/hosthooks.ts"))).toBe(false);
+
+    const removed = runUninstall(root);
+    expect(removed.removed).toContain("src/warn-once.ts");
+    expect(fs.existsSync(path.join(root, "src/warn-once.ts"))).toBe(false);
+  });
+
   it("rolls back when a later transform fails", () => {
     const root = tempRoot();
     writeFixtureTree(root, fs, path);

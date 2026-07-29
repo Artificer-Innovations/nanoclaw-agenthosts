@@ -146,6 +146,33 @@ describe("patchContainerRunner", () => {
     expect(patchContainerRunner(upgraded)).toBe(upgraded);
   });
 
+  it("re-emits wake-prepare slot when public-exports lost it", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withoutSlot = installed.replace(
+      /[ \t]*\/\/ @nanoclaw-sessionio:wake-prepare-meta-slot\r?\n/,
+      "",
+    );
+    expect(withoutSlot).not.toContain("wake-prepare-meta-slot");
+    const refreshed = patchContainerRunner(withoutSlot);
+    expect(refreshed).toContain(
+      "    // @nanoclaw-sessionio:wake-prepare-meta-slot",
+    );
+  });
+
+  it("still extracts wake-prepare when public-exports end appears before begin", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Defensive: first end marker before begin forces region fallback to full source.
+    const corrupted = installed.replace(
+      BEGIN("public-exports"),
+      `${END("public-exports")}\n${BEGIN("public-exports")}`,
+    );
+    const refreshed = patchContainerRunner(corrupted);
+    expect(refreshed).toContain(
+      "    // @nanoclaw-sessionio:wake-prepare-meta-slot",
+    );
+    expect(refreshed).toContain(BEGIN("public-exports"));
+  });
+
   it("keeps sessions-import as a sibling of container-import (not nested)", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     const containerEnd = patched.indexOf(END("container-import"));
