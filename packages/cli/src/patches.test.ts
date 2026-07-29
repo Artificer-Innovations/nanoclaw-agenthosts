@@ -104,6 +104,18 @@ describe("patchContainerRunner", () => {
     expect(installed).toContain(
       "writeSessionRouting(session.agent_group_id, session.id)",
     );
+    // Ambient stock imports — wake prepare must not installImport these
+    // (would duplicate bindings). Fixture mirrors real container-runner.ts.
+    expect(fixtureSources.containerRunner).toContain(
+      "import { getDb, hasTable } from './db/connection.js';",
+    );
+    expect(fixtureSources.containerRunner).toContain(
+      "import { writeSessionRouting } from './session-manager.js';",
+    );
+    expect(installed).toMatch(/hasTable\(getDb\(\),\s*'agent_destinations'\)/);
+    expect(installed).not.toMatch(
+      /@nanoclaw-agenthosts:connection-import:begin/,
+    );
   });
 
   it("keeps sessions-import as a sibling of container-import (not nested)", () => {

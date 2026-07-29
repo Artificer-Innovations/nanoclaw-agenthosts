@@ -326,8 +326,16 @@ export async function wakeContainer(session: Session): Promise<boolean> {
   const runtime = resolveRuntimeName(session);
   try {
     // Project destinations/routing before ANY runtime wake (docker, process, …).
-    // spawnContainer (docker) also does this; process/other drivers must not skip it
-    // or the agent wakes with an empty destinations map and cannot deliver.
+    // spawnContainer (docker) already does the same projection; calling it here too
+    // is intentional and idempotent (replaceDestinations + routing upsert) so
+    // process/other drivers cannot skip it and wake with an empty destinations map.
+    //
+    // Ambient free identifiers — already present in stock container-runner.ts:
+    //   hasTable/getDb  → import from './db/connection.js' (spawnContainer's
+    //                     writeDestinations gate uses the identical call)
+    //   writeSessionRouting → import from './session-manager.js' (sessionio's
+    //                     container-runner-meta patch also anchors on this call)
+    // Do not installImport them: a second binding would duplicate stock imports and break tsc.
     if (hasTable(getDb(), 'agent_destinations')) {
       const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
       writeDestinations(session.agent_group_id, session.id);
