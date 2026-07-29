@@ -84,7 +84,10 @@ export function resolveSessionTransportNameFromRow(
   session: SessionRef,
   row: ContainerConfigSnippet | undefined,
 ): string {
-  if (sessionTransportResolver) return sessionTransportResolver(session).trim();
+  if (sessionTransportResolver) {
+    const fromResolver = sessionTransportResolver(session).trim();
+    if (fromResolver) return fromResolver;
+  }
   const fromRow = row?.session_transport?.trim();
   if (fromRow) return fromRow;
   return "filesystem";

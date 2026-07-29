@@ -213,6 +213,13 @@ export function writeFixtureTree(
     "src/types.ts": fixtureSources.types,
     "src/db/container-configs.ts": fixtureSources.containerConfigs,
     "src/db/migrations/index.ts": fixtureSources.migrationsIndex,
+    "src/db/sessions.ts": `export function getSession(
+  sessionId: string,
+): { id: string; agent_group_id: string } | undefined {
+  void sessionId;
+  return undefined;
+}
+`,
     "src/cli/resources/groups.ts": fixtureSources.groups,
   };
   for (const [relative, content] of Object.entries(files)) {

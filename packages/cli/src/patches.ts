@@ -388,6 +388,25 @@ export function patchIndex(source: string): string {
     "index cleanupOrphans call",
   );
 
+  // Drop unused cleanupOrphans from the stock container-runtime import so hosts
+  // that lint unused imports still build after install.
+  content = content.replace(
+    /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
+    (match, symbols: string) => {
+      const parts = symbols
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const next = parts.filter((s) => s !== "cleanupOrphans");
+      if (next.length === parts.length) return match;
+      if (next.length === 0) {
+        // Only cleanupOrphans was imported — drop the whole statement.
+        return "";
+      }
+      return `import { ${next.join(", ")} } from './container-runtime.js';`;
+    },
+  );
+
   return content;
 }
 
@@ -404,6 +423,32 @@ export function unpatchIndex(source: string): string {
       "  ensureContainerRuntimeRunning();\n  cleanupOrphans();\n",
       "restore cleanupOrphans",
     );
+  }
+  // Restore cleanupOrphans on the container-runtime import when the call is back.
+  // patchIndex may have dropped the whole import when cleanupOrphans was its only
+  // symbol — synthesize a fresh import in that case so uninstall is runnable.
+  if (content.includes("cleanupOrphans();")) {
+    const importRe = /import \{([^}]+)\} from '\.\/container-runtime\.js';/;
+    if (importRe.test(content)) {
+      content = content.replace(importRe, (match, symbols: string) => {
+        const parts = symbols
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (parts.includes("cleanupOrphans")) return match;
+        const ensureIdx = parts.indexOf("ensureContainerRuntimeRunning");
+        if (ensureIdx >= 0) parts.splice(ensureIdx + 1, 0, "cleanupOrphans");
+        else parts.push("cleanupOrphans");
+        return `import { ${parts.join(", ")} } from './container-runtime.js';`;
+      });
+    } else {
+      const stmt = `import { cleanupOrphans } from './container-runtime.js';\n`;
+      const firstImport = content.search(/^import /m);
+      content =
+        firstImport >= 0
+          ? content.slice(0, firstImport) + stmt + content.slice(firstImport)
+          : stmt + content;
+    }
   }
   return content;
 }
