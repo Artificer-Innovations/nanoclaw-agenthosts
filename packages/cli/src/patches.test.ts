@@ -74,9 +74,7 @@ describe("patchContainerRunner", () => {
     );
     const upgraded = patchContainerRunner(withoutImport);
     expect(upgraded).toContain("const runtime = resolveRuntimeName(session);");
-    expect(upgraded).not.toMatch(
-      /import \{[^}]+\} from '\.\/agenthosts\.js';/,
-    );
+    expect(upgraded).not.toMatch(/import \{[^}]+\} from '\.\/agenthosts\.js';/);
   });
 
   it("keeps sessions-import as a sibling of container-import (not nested)", () => {
