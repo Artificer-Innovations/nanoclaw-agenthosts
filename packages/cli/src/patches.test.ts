@@ -54,6 +54,31 @@ describe("patchContainerRunner", () => {
     expect(patchContainerRunner(upgraded)).toBe(upgraded);
   });
 
+  it("keeps unknown agenthosts import symbols when widening on upgrade", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withExtra = installed.replace(
+      "import { registerRuntimeDriver, resolveRuntimeDriver, resolveRuntimeName, setContainerConfigReader, setSessionTransportResolver } from './agenthosts.js';",
+      "import { registerRuntimeDriver, resolveRuntimeDriver, setContainerConfigReader, someFutureHelper } from './agenthosts.js';",
+    );
+    const upgraded = patchContainerRunner(withExtra);
+    expect(upgraded).toMatch(
+      /import \{ registerRuntimeDriver, resolveRuntimeDriver, resolveRuntimeName, setContainerConfigReader, setSessionTransportResolver, someFutureHelper \} from '\.\/agenthosts\.js';/,
+    );
+  });
+
+  it("still refreshes public-exports when the agenthosts import line is missing", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withoutImport = installed.replace(
+      /import \{[^}]+\} from '\.\/agenthosts\.js';\r?\n/,
+      "",
+    );
+    const upgraded = patchContainerRunner(withoutImport);
+    expect(upgraded).toContain("const runtime = resolveRuntimeName(session);");
+    expect(upgraded).not.toMatch(
+      /import \{[^}]+\} from '\.\/agenthosts\.js';/,
+    );
+  });
+
   it("keeps sessions-import as a sibling of container-import (not nested)", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     const containerEnd = patched.indexOf(END("container-import"));
