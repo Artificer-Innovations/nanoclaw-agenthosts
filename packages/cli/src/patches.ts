@@ -35,12 +35,26 @@ function installImport(
   modulePath: string,
   symbols: string[],
   name: string,
+  options: { afterMarker?: string } = {},
 ): string {
   if (content.includes(begin(name))) return content;
+  const block = `${begin(name)}\nimport { ${symbols.join(", ")} } from '${modulePath}';\n${end(name)}\n`;
+  if (options.afterMarker) {
+    const anchor = end(options.afterMarker);
+    const idx = content.indexOf(anchor);
+    if (idx < 0) {
+      throw new Error(
+        `Could not find ${options.afterMarker} end marker for ${name}`,
+      );
+    }
+    let insertAt = idx + anchor.length;
+    if (content[insertAt] === "\r") insertAt += 1;
+    if (content[insertAt] === "\n") insertAt += 1;
+    return content.slice(0, insertAt) + block + content.slice(insertAt);
+  }
   const firstImport = content.search(/^import /m);
   if (firstImport < 0)
     throw new Error(`Could not find import anchor for ${name}`);
-  const block = `${begin(name)}\nimport { ${symbols.join(", ")} } from '${modulePath}';\n${end(name)}\n`;
   return content.slice(0, firstImport) + block + content.slice(firstImport);
 }
 
@@ -104,13 +118,21 @@ export function patchContainerRunner(source: string): string {
     "public-exports",
   ];
 
-  // Already installed (v1): ensure sessions import + refresh public-exports body.
+  // Already installed (v1): ensure sibling imports + refresh public-exports body.
   if (coreNames.every((name) => source.includes(begin(name)))) {
     let content = installImport(
       source,
       "./db/sessions.js",
       ["getSession"],
       "sessions-import",
+      { afterMarker: "container-import" },
+    );
+    content = installImport(
+      content,
+      "node:module",
+      ["createRequire"],
+      "create-require-import",
+      { afterMarker: "sessions-import" },
     );
     return refreshPublicExports(content);
   }
@@ -127,16 +149,28 @@ export function patchContainerRunner(source: string): string {
     [
       "registerRuntimeDriver",
       "resolveRuntimeDriver",
+      "resolveRuntimeName",
       "setContainerConfigReader",
+      "setSessionTransportResolver",
     ],
     "container-import",
   );
 
+  // Insert as a sibling after container-import:end — never nest inside that block.
   content = installImport(
     content,
     "./db/sessions.js",
     ["getSession"],
     "sessions-import",
+    { afterMarker: "container-import" },
+  );
+
+  content = installImport(
+    content,
+    "node:module",
+    ["createRequire"],
+    "create-require-import",
+    { afterMarker: "sessions-import" },
   );
 
   if (content.includes(STOCK_RUNTIME_IMPORT)) {
@@ -146,7 +180,7 @@ export function patchContainerRunner(source: string): string {
       PATCHED_RUNTIME_IMPORT,
       "cleanupOrphans import",
     );
-  } else if (!/cleanupOrphans/.test(content)) {
+  } else if (!content.includes(PATCHED_RUNTIME_IMPORT)) {
     throw new Error(
       "Could not find container-runtime import to add cleanupOrphans",
     );
@@ -189,6 +223,19 @@ export function patchContainerRunner(source: string): string {
   };
 });
 
+// Optional companion: live transport name from nanoclaw-sessionio for requiredTransport checks.
+try {
+  const require = createRequire(import.meta.url);
+  const sessionio = require('./sessionio.js') as {
+    resolveTransportName?: (session: { id: string; agent_group_id: string }) => string;
+  };
+  if (typeof sessionio.resolveTransportName === 'function') {
+    setSessionTransportResolver((session) => sessionio.resolveTransportName!(session));
+  }
+} catch {
+  // sessionio not installed in this host tree — fall back to DB / filesystem default
+}
+
 registerRuntimeDriver('docker', {
   wake: (session) => wakeContainerDocker(session as Session),
   kill: killContainerDocker,
@@ -213,41 +260,56 @@ registerRuntimeDriver('docker', {
 
 function publicExportsBody(): string {
   return `export function isContainerRunning(sessionId: string): boolean {
+  const session = getSession(sessionId);
+  if (!session) return isContainerRunningDocker(sessionId);
+  const runtime = resolveRuntimeName(session);
   try {
-    const session = getSession(sessionId);
-    if (session) return resolveRuntimeDriver(session).isRunning(sessionId);
+    return resolveRuntimeDriver(session).isRunning(sessionId);
   } catch (err) {
-    log.debug('isContainerRunning driver resolve failed — falling back to docker map', {
-      sessionId,
-      err,
-    });
+    if (runtime === 'docker') {
+      log.debug('isContainerRunning docker driver resolve failed — falling back to docker map', {
+        sessionId,
+        err,
+      });
+      return isContainerRunningDocker(sessionId);
+    }
+    throw err;
   }
-  return isContainerRunningDocker(sessionId);
 }
 
-export function wakeContainer(session: Session): Promise<boolean> {
+export async function wakeContainer(session: Session): Promise<boolean> {
+  const runtime = resolveRuntimeName(session);
   try {
-    return resolveRuntimeDriver(session).wake(session, {});
+    return await resolveRuntimeDriver(session).wake(session, {});
   } catch (err) {
-    log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
-    return Promise.resolve(false);
+    if (runtime === 'docker') {
+      log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      return false;
+    }
+    throw err;
   }
 }
 
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
+  const session = getSession(sessionId);
+  if (!session) {
+    killContainerDocker(sessionId, reason, onExit);
+    return;
+  }
+  const runtime = resolveRuntimeName(session);
   try {
-    const session = getSession(sessionId);
-    if (session) {
-      resolveRuntimeDriver(session).kill(sessionId, reason, onExit);
+    resolveRuntimeDriver(session).kill(sessionId, reason, onExit);
+  } catch (err) {
+    if (runtime === 'docker') {
+      log.warn('killContainer docker driver resolve failed — falling back to docker kill', {
+        sessionId,
+        err,
+      });
+      killContainerDocker(sessionId, reason, onExit);
       return;
     }
-  } catch (err) {
-    log.warn('killContainer driver resolve failed — falling back to docker kill', {
-      sessionId,
-      err,
-    });
+    throw err;
   }
-  killContainerDocker(sessionId, reason, onExit);
 }`;
 }
 
@@ -281,6 +343,7 @@ export function unpatchContainerRunner(source: string): string {
     "kill-rename",
     "wake-rename",
     "is-running-rename",
+    "create-require-import",
     "sessions-import",
     "container-import",
   ]) {
@@ -495,6 +558,8 @@ export function patchMigrationsIndex(source: string): string {
 
   let content = source;
 
+  // Coupled to upstream tip migration019: bump these anchors when NanoClaw adds
+  // migration020+ before this package's migration020 is still the next number.
   if (!content.includes(begin("migrations-import"))) {
     content = replaceOnce(
       content,
@@ -531,6 +596,7 @@ export function unpatchMigrationsIndex(source: string): string {
 
 export function patchGroupsCli(source: string): string {
   const names = [
+    "groups-agenthosts-import",
     "groups-present-config",
     "groups-create-runtime",
     "groups-config-update-desc",
@@ -539,8 +605,15 @@ export function patchGroupsCli(source: string): string {
   ];
   if (isFullyPatched(source, names)) return source;
 
-  let content = replaceOnce(
+  let content = installImport(
     source,
+    "../../agenthosts.js",
+    ["listRegisteredRuntimes"],
+    "groups-agenthosts-import",
+  );
+
+  content = replaceOnce(
+    content,
     `    cli_scope: row.cli_scope,
     updated_at: row.updated_at,
   };
@@ -569,7 +642,16 @@ export function patchGroupsCli(source: string): string {
       `        initGroupFilesystem(group);
         if (args.runtime !== undefined || args['session-transport'] !== undefined || args.session_transport !== undefined) {
           const stamped: Partial<Pick<ContainerConfigRow, 'runtime' | 'session_transport'>> = {};
-          if (args.runtime !== undefined) stamped.runtime = String(args.runtime);
+          if (args.runtime !== undefined) {
+            const runtime = String(args.runtime);
+            const known = listRegisteredRuntimes();
+            if (known.length > 0 && !known.includes(runtime)) {
+              throw new Error(
+                \`--runtime must be one of the registered runtimes: \${known.join(', ')} (got "\${runtime}")\`,
+              );
+            }
+            stamped.runtime = runtime;
+          }
           const transport = args['session-transport'] ?? args.session_transport;
           if (transport !== undefined) stamped.session_transport = String(transport);
           updateContainerConfigScalars(id, stamped);
@@ -625,7 +707,16 @@ export function patchGroupsCli(source: string): string {
           }
           updates.cli_scope = scope;
         }
-        if (args.runtime !== undefined) updates.runtime = args.runtime as string;
+        if (args.runtime !== undefined) {
+          const runtime = args.runtime as string;
+          const known = listRegisteredRuntimes();
+          if (known.length > 0 && !known.includes(runtime)) {
+            throw new Error(
+              \`--runtime must be one of the registered runtimes: \${known.join(', ')} (got "\${runtime}")\`,
+            );
+          }
+          updates.runtime = runtime;
+        }
         if (args['session-transport'] !== undefined || args.session_transport !== undefined) {
           updates.session_transport = String(args['session-transport'] ?? args.session_transport);
         }
@@ -657,7 +748,16 @@ export function unpatchGroupsCli(source: string): string {
           }
           updates.cli_scope = scope;
         }
-        if (args.runtime !== undefined) updates.runtime = args.runtime as string;
+        if (args.runtime !== undefined) {
+          const runtime = args.runtime as string;
+          const known = listRegisteredRuntimes();
+          if (known.length > 0 && !known.includes(runtime)) {
+            throw new Error(
+              \`--runtime must be one of the registered runtimes: \${known.join(', ')} (got "\${runtime}")\`,
+            );
+          }
+          updates.runtime = runtime;
+        }
         if (args['session-transport'] !== undefined || args.session_transport !== undefined) {
           updates.session_transport = String(args['session-transport'] ?? args.session_transport);
         }
@@ -716,7 +816,16 @@ export function unpatchGroupsCli(source: string): string {
         `        initGroupFilesystem(group);
         if (args.runtime !== undefined || args['session-transport'] !== undefined || args.session_transport !== undefined) {
           const stamped: Partial<Pick<ContainerConfigRow, 'runtime' | 'session_transport'>> = {};
-          if (args.runtime !== undefined) stamped.runtime = String(args.runtime);
+          if (args.runtime !== undefined) {
+            const runtime = String(args.runtime);
+            const known = listRegisteredRuntimes();
+            if (known.length > 0 && !known.includes(runtime)) {
+              throw new Error(
+                \`--runtime must be one of the registered runtimes: \${known.join(', ')} (got "\${runtime}")\`,
+              );
+            }
+            stamped.runtime = runtime;
+          }
           const transport = args['session-transport'] ?? args.session_transport;
           if (transport !== undefined) stamped.session_transport = String(transport);
           updateContainerConfigScalars(id, stamped);
@@ -754,6 +863,8 @@ export function unpatchGroupsCli(source: string): string {
       "restore presentConfig",
     );
   }
+
+  content = removeMarkedBlock(content, "groups-agenthosts-import");
 
   return content;
 }

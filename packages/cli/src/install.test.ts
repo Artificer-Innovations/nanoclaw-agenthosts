@@ -150,7 +150,7 @@ describe("install / verify / uninstall", () => {
     expect(() => runInstall(root)).toThrow(/Missing bundled resource/);
   });
 
-  it("syncSkillToFork replaces file destinations and clears prior contents", () => {
+  it("syncSkillToFork replaces file destinations without wiping user files", () => {
     const root = tempRoot();
     writeFixtureTree(root, fs, path);
     const skillPath = path.join(root, ".claude/skills/add-agenthosts");
@@ -162,10 +162,10 @@ describe("install / verify / uninstall", () => {
 
     fs.writeFileSync(path.join(skillPath, "stale.txt"), "stale");
     syncSkillToFork(root);
-    expect(fs.existsSync(path.join(skillPath, "stale.txt"))).toBe(false);
+    expect(fs.existsSync(path.join(skillPath, "stale.txt"))).toBe(true);
   });
 
-  it("syncSkillToFork replaces symlink destinations safely", () => {
+  it("syncSkillToFork preserves destination symlinks and user files", () => {
     const root = tempRoot();
     writeFixtureTree(root, fs, path);
     const skillLink = path.join(root, ".claude/skills/add-agenthosts");
@@ -173,11 +173,63 @@ describe("install / verify / uninstall", () => {
     const elsewhere = path.join(root, "elsewhere");
     fs.mkdirSync(elsewhere);
     fs.writeFileSync(path.join(elsewhere, "keep.txt"), "keep");
+    fs.writeFileSync(path.join(elsewhere, "notes.md"), "mine");
     fs.symlinkSync(elsewhere, skillLink);
     syncSkillToFork(root);
-    expect(fs.lstatSync(skillLink).isSymbolicLink()).toBe(false);
+    expect(fs.lstatSync(skillLink).isSymbolicLink()).toBe(true);
     expect(fs.existsSync(path.join(elsewhere, "keep.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(elsewhere, "notes.md"))).toBe(true);
     expect(fs.existsSync(path.join(skillLink, "SKILL.md"))).toBe(true);
+  });
+
+  it("syncSkillToFork does not wipe user files in an existing skill dir", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    syncSkillToFork(root);
+    const notes = path.join(root, ".claude/skills/add-agenthosts/notes.md");
+    fs.writeFileSync(notes, "keep-me");
+    syncSkillToFork(root);
+    expect(fs.readFileSync(notes, "utf8")).toBe("keep-me");
+    expect(
+      fs.existsSync(path.join(root, ".claude/skills/add-agenthosts/SKILL.md")),
+    ).toBe(true);
+  });
+
+  it("rolls back committed writes when a later atomic write fails", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    const original = fs.renameSync;
+    let renames = 0;
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      renames += 1;
+      // Fail after transform files + first new resource (previous === null) committed.
+      if (renames === 8) throw new Error("disk-full");
+      return original(from, to);
+    });
+    try {
+      expect(() => runInstall(root)).toThrow(/disk-full/);
+      expect(fs.existsSync(path.join(root, "src/agenthosts.ts"))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("preserves the original error when rollback also fails", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    const originalRename = fs.renameSync;
+    let renames = 0;
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      renames += 1;
+      if (renames === 2) throw new Error("write-boom");
+      if (renames > 2) throw new Error("rollback-boom");
+      return originalRename(from, to);
+    });
+    try {
+      expect(() => runInstall(root)).toThrow(AggregateError);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("runInstall/verify/uninstall without --path use cwd NanoClaw root", () => {

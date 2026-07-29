@@ -70,8 +70,9 @@ export function listRegisteredRuntimes(): string[] {
   return [...drivers.keys()].sort();
 }
 
-export function resolveRuntimeName(session: SessionRef): string {
-  const row = containerConfigReader?.(session.agent_group_id);
+export function resolveRuntimeNameFromRow(
+  row: ContainerConfigSnippet | undefined,
+): string {
   const fromRow = row?.runtime?.trim();
   if (fromRow) return fromRow;
   const fromEnv = process.env.NANOCLAW_DEFAULT_RUNTIME?.trim();
@@ -79,12 +80,27 @@ export function resolveRuntimeName(session: SessionRef): string {
   return DEFAULT_RUNTIME;
 }
 
-export function resolveSessionTransportName(session: SessionRef): string {
-  if (sessionTransportResolver) return sessionTransportResolver(session);
-  const row = containerConfigReader?.(session.agent_group_id);
+export function resolveSessionTransportNameFromRow(
+  session: SessionRef,
+  row: ContainerConfigSnippet | undefined,
+): string {
+  if (sessionTransportResolver) return sessionTransportResolver(session).trim();
   const fromRow = row?.session_transport?.trim();
   if (fromRow) return fromRow;
   return "filesystem";
+}
+
+export function resolveRuntimeName(session: SessionRef): string {
+  return resolveRuntimeNameFromRow(
+    containerConfigReader?.(session.agent_group_id),
+  );
+}
+
+export function resolveSessionTransportName(session: SessionRef): string {
+  return resolveSessionTransportNameFromRow(
+    session,
+    containerConfigReader?.(session.agent_group_id),
+  );
 }
 
 function transportMatches(
@@ -92,11 +108,12 @@ function transportMatches(
   required: string | string[],
 ): boolean {
   const allowed = Array.isArray(required) ? required : [required];
-  return allowed.map((value) => value.trim()).includes(actual);
+  return allowed.map((value) => value.trim()).includes(actual.trim());
 }
 
 export function resolveRuntimeDriver(session: SessionRef): RuntimeDriver {
-  const name = resolveRuntimeName(session);
+  const row = containerConfigReader?.(session.agent_group_id);
+  const name = resolveRuntimeNameFromRow(row);
   const driver = drivers.get(name);
   if (!driver) {
     warnOnce(
@@ -107,7 +124,7 @@ export function resolveRuntimeDriver(session: SessionRef): RuntimeDriver {
   }
 
   if (driver.requiredTransport) {
-    const transport = resolveSessionTransportName(session);
+    const transport = resolveSessionTransportNameFromRow(session, row);
     if (!transportMatches(transport, driver.requiredTransport)) {
       const required = Array.isArray(driver.requiredTransport)
         ? driver.requiredTransport.join("|")

@@ -25,9 +25,35 @@ describe("patchContainerRunner", () => {
     expect(once).toContain("@nanoclaw-hosthooks:container-import:begin");
     expect(once).toContain("function wakeContainerDocker");
     expect(once).toContain("registerRuntimeDriver");
-    expect(once).toContain("export function wakeContainer");
+    expect(once).toContain("export async function wakeContainer");
     expect(once).toContain("getSession");
+    expect(once).toContain("setSessionTransportResolver");
+    expect(once).toContain("createRequire");
     expect(patchContainerRunner(once)).toBe(once);
+  });
+
+  it("keeps sessions-import as a sibling of container-import (not nested)", () => {
+    const patched = patchContainerRunner(fixtureSources.containerRunner);
+    const containerEnd = patched.indexOf(END("container-import"));
+    const sessionsBegin = patched.indexOf(BEGIN("sessions-import"));
+    const sessionsEnd = patched.indexOf(END("sessions-import"));
+    expect(containerEnd).toBeGreaterThan(-1);
+    expect(sessionsBegin).toBeGreaterThan(containerEnd);
+    expect(sessionsEnd).toBeGreaterThan(sessionsBegin);
+    const restored = unpatchContainerRunner(patched);
+    expect(restored).not.toContain("@nanoclaw-agenthosts:");
+    expect(restored).not.toContain("getSession");
+  });
+
+  it("only falls back to docker when runtime resolves to docker", () => {
+    const patched = patchContainerRunner(fixtureSources.containerRunner);
+    expect(patched).toContain("if (runtime === 'docker')");
+    expect(patched).toContain(
+      "return await resolveRuntimeDriver(session).wake",
+    );
+    expect(patched).not.toContain(
+      "return resolveRuntimeDriver(session).wake(session, {});",
+    );
   });
 
   it("refreshes public-exports on already-installed trees (upgrade path)", () => {
@@ -72,6 +98,16 @@ describe("patchContainerRunner", () => {
     const source = fixtureSources.containerRunner.replace(
       "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
       "import { CONTAINER_RUNTIME_BIN } from './other.js';",
+    );
+    expect(() => patchContainerRunner(source)).toThrow(
+      /Could not find container-runtime import/,
+    );
+  });
+
+  it("does not treat a bare cleanupOrphans mention as a wired import", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './other.js';\n// cleanupOrphans mentioned in a comment",
     );
     expect(() => patchContainerRunner(source)).toThrow(
       /Could not find container-runtime import/,
@@ -191,11 +227,16 @@ ${END("types-runtime-fields")}`,
     expect(patched).toContain("runtime: row.runtime");
     expect(patched).toContain("args.runtime");
     expect(patched).toContain("--session-transport");
+    expect(patched).toContain("listRegisteredRuntimes");
+    expect(patched).toContain(
+      "--runtime must be one of the registered runtimes",
+    );
     expect(patchGroupsCli(patched)).toBe(patched);
     const restored = unpatchGroupsCli(patched);
     expect(restored).toContain(
       "initGroupFilesystem(group);\n        return getAgentGroupByFolder(folder);",
     );
+    expect(restored).not.toContain("listRegisteredRuntimes");
   });
 });
 
@@ -207,6 +248,49 @@ describe("partial markers and anchors", () => {
     expect(() => patchContainerRunner(partial)).toThrow(
       /Partial agenthosts markers/,
     );
+  });
+
+  it("throws when afterMarker is missing for a sibling import", () => {
+    const patched = patchContainerRunner(fixtureSources.containerRunner);
+    const withoutSiblings = patched
+      .replace(
+        new RegExp(
+          `${BEGIN("create-require-import")}[\\s\\S]*?${END("create-require-import")}\\r?\\n?`,
+        ),
+        "",
+      )
+      .replace(
+        new RegExp(
+          `${BEGIN("sessions-import")}[\\s\\S]*?${END("sessions-import")}\\r?\\n?`,
+        ),
+        "",
+      )
+      .replace(`${END("container-import")}\n`, "");
+    expect(() => patchContainerRunner(withoutSiblings)).toThrow(
+      /Could not find container-import end marker/,
+    );
+  });
+
+  it("inserts sibling imports after CRLF end markers", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const withoutSiblings = installed
+      .replace(
+        new RegExp(
+          `${BEGIN("create-require-import")}[\\s\\S]*?${END("create-require-import")}\\r?\\n?`,
+        ),
+        "",
+      )
+      .replace(
+        new RegExp(
+          `${BEGIN("sessions-import")}[\\s\\S]*?${END("sessions-import")}\\r?\\n?`,
+        ),
+        "",
+      );
+    const crlf = withoutSiblings.replaceAll("\n", "\r\n");
+    const patched = patchContainerRunner(crlf);
+    const containerEnd = patched.indexOf(END("container-import"));
+    const sessionsBegin = patched.indexOf(BEGIN("sessions-import"));
+    expect(sessionsBegin).toBeGreaterThan(containerEnd);
   });
 
   it("throws when import anchors are missing", () => {

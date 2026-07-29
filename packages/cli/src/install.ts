@@ -235,11 +235,21 @@ function commitWrites(writes: PendingWrite[]): void {
       atomicWrite(write.path, write.content, write.mode);
       committed.push(write);
     }
-    /* v8 ignore next 8 */
   } catch (error) {
+    const rollbackErrors: unknown[] = [];
     for (const write of committed.reverse()) {
-      if (write.previous === null) fs.rmSync(write.path, { force: true });
-      else atomicWrite(write.path, write.previous, write.mode);
+      try {
+        if (write.previous === null) fs.rmSync(write.path, { force: true });
+        else atomicWrite(write.path, write.previous, write.mode);
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError);
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...rollbackErrors],
+        "Install write failed and rollback also failed",
+      );
     }
     throw error;
   }
@@ -262,12 +272,16 @@ function atomicWrite(target: string, content: Buffer, mode?: number): void {
 
 function copyDirectory(source: string, destination: string): void {
   const existing = fs.lstatSync(destination, { throwIfNoEntry: false });
-  if (existing && !existing.isDirectory())
-    fs.rmSync(destination, { force: true });
-  fs.mkdirSync(destination, { recursive: true });
-  for (const entry of fs.readdirSync(destination)) {
-    fs.rmSync(path.join(destination, entry), { recursive: true, force: true });
+  if (existing?.isSymbolicLink()) {
+    // Preserve live-edit symlinks: write through to the real target.
+    copyDirectory(source, fs.realpathSync(destination));
+    return;
   }
+  if (existing && !existing.isDirectory()) {
+    fs.rmSync(destination, { force: true });
+  }
+  fs.mkdirSync(destination, { recursive: true });
+  // Overwrite package-owned entries only — do not wipe user notes/overrides.
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
     const from = path.join(source, entry.name);
     const to = path.join(destination, entry.name);

@@ -119,6 +119,25 @@ describe("registerRuntimeDriver / resolveRuntimeDriver", () => {
     );
   });
 
+  it("trims whitespace on both actual and required transports", () => {
+    const fly = stubDriver({ requiredTransport: " http " });
+    registerRuntimeDriver("fly", fly);
+    setSessionTransportResolver(() => "  http  ");
+    setContainerConfigReader(() => ({ runtime: "fly" }));
+    expect(resolveRuntimeDriver(session)).toBe(fly);
+  });
+
+  it("reads container config once when enforcing requiredTransport", () => {
+    const reader = vi.fn(() => ({
+      runtime: "fly",
+      session_transport: "http",
+    }));
+    registerRuntimeDriver("fly", stubDriver({ requiredTransport: "http" }));
+    setContainerConfigReader(reader);
+    resolveRuntimeDriver(session);
+    expect(reader).toHaveBeenCalledTimes(1);
+  });
+
   it("allows matching requiredTransport string or array", () => {
     const fly = stubDriver({ requiredTransport: ["http", "grpc"] });
     registerRuntimeDriver("fly", fly);

@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,7 +19,9 @@ function run(command, args, cwd = root) {
 run("pnpm", ["run", "build"]);
 
 const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "agenthosts-int-"));
-const writeFixture = await import(path.join(root, "dist/cli/test-fixtures.js"));
+const writeFixture = await import(
+  pathToFileURL(path.join(root, "dist/cli/test-fixtures.js")).href
+);
 writeFixture.writeFixtureTree(fixture, fs, path);
 
 const bin = path.join(root, "dist/cli/bin.js");
@@ -35,9 +37,6 @@ const runner = fs.readFileSync(
 if (runner.includes("@nanoclaw-agenthosts:")) {
   console.error("Uninstall left agenthosts markers behind");
   process.exit(1);
-}
-if (!fs.existsSync(path.join(fixture, "src/agenthosts.ts")) === false) {
-  // agenthosts.ts should be removed
 }
 if (fs.existsSync(path.join(fixture, "src/agenthosts.ts"))) {
   console.error("Uninstall left src/agenthosts.ts");
