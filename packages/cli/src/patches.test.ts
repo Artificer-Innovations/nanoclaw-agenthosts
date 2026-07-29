@@ -148,9 +148,15 @@ describe("patchIndex", () => {
   it("replaces orphan cleanup and uninstalls cleanly", () => {
     const patched = patchIndex(fixtureSources.index);
     expect(patched).toContain("await runRuntimeOrphanCleanup()");
+    expect(patched).not.toMatch(
+      /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
+    );
     expect(patchIndex(patched)).toBe(patched);
     const restored = unpatchIndex(patched);
     expect(restored).toContain("cleanupOrphans();");
+    expect(restored).toMatch(
+      /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
+    );
     expect(restored).not.toContain("@nanoclaw-agenthosts:");
   });
 
@@ -164,6 +170,56 @@ async function main(): Promise<void> {
 `;
     const restored = unpatchIndex(source);
     expect(restored).toContain("cleanupOrphans();");
+    expect(restored).toMatch(
+      /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
+    );
+  });
+
+  it("leaves import unchanged when cleanupOrphans was never present", () => {
+    const source = `import { ensureContainerRuntimeRunning } from './container-runtime.js';
+
+async function main(): Promise<void> {
+  cleanupOrphans();
+}
+`;
+    const patched = patchIndex(source);
+    expect(patched).toContain("await runRuntimeOrphanCleanup()");
+    expect(patched).toContain(
+      "import { ensureContainerRuntimeRunning } from './container-runtime.js';",
+    );
+  });
+
+  it("keeps existing cleanupOrphans import on uninstall when already present", () => {
+    const patched = `import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
+// @nanoclaw-agenthosts:index-import:begin
+import { runRuntimeOrphanCleanup } from './agenthosts.js';
+// @nanoclaw-agenthosts:index-import:end
+async function main(): Promise<void> {
+  ensureContainerRuntimeRunning();
+// @nanoclaw-agenthosts:index-orphan-cleanup:begin
+  await runRuntimeOrphanCleanup();
+// @nanoclaw-agenthosts:index-orphan-cleanup:end
+}
+`;
+    const restored = unpatchIndex(patched);
+    expect(restored).toContain("cleanupOrphans();");
+    expect(restored).toContain(
+      "import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';",
+    );
+  });
+
+  it("appends cleanupOrphans when container-runtime import lacks ensureContainerRuntimeRunning", () => {
+    const source = `import { stopContainer } from './container-runtime.js';
+
+async function main(): Promise<void> {
+  ensureContainerRuntimeRunning();
+}
+`;
+    const restored = unpatchIndex(source);
+    expect(restored).toContain("cleanupOrphans();");
+    expect(restored).toContain(
+      "import { stopContainer, cleanupOrphans } from './container-runtime.js';",
+    );
   });
 });
 

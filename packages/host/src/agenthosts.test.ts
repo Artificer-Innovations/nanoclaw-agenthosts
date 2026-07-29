@@ -177,6 +177,16 @@ describe("session transport resolution", () => {
     expect(resolveSessionTransportName(session)).toBe("http");
   });
 
+  it("falls back when resolver returns empty/whitespace", () => {
+    setSessionTransportResolver(() => "   ");
+    setContainerConfigReader(() => ({ session_transport: "http" }));
+    expect(resolveSessionTransportName(session)).toBe("http");
+
+    setSessionTransportResolver(() => "");
+    setContainerConfigReader(() => ({ session_transport: null }));
+    expect(resolveSessionTransportName(session)).toBe("filesystem");
+  });
+
   it("clears injectable resolvers", () => {
     setContainerConfigReader(() => ({ runtime: "process" }));
     setSessionTransportResolver(() => "http");

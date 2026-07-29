@@ -388,6 +388,21 @@ export function patchIndex(source: string): string {
     "index cleanupOrphans call",
   );
 
+  // Drop unused cleanupOrphans from the stock container-runtime import so hosts
+  // that lint unused imports still build after install.
+  content = content.replace(
+    /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
+    (match, symbols: string) => {
+      const parts = symbols
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const next = parts.filter((s) => s !== "cleanupOrphans");
+      if (next.length === parts.length) return match;
+      return `import { ${next.join(", ")} } from './container-runtime.js';`;
+    },
+  );
+
   return content;
 }
 
@@ -403,6 +418,23 @@ export function unpatchIndex(source: string): string {
       "  ensureContainerRuntimeRunning();\n",
       "  ensureContainerRuntimeRunning();\n  cleanupOrphans();\n",
       "restore cleanupOrphans",
+    );
+  }
+  // Restore cleanupOrphans on the container-runtime import when the call is back.
+  if (content.includes("cleanupOrphans();")) {
+    content = content.replace(
+      /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
+      (match, symbols: string) => {
+        const parts = symbols
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (parts.includes("cleanupOrphans")) return match;
+        const ensureIdx = parts.indexOf("ensureContainerRuntimeRunning");
+        if (ensureIdx >= 0) parts.splice(ensureIdx + 1, 0, "cleanupOrphans");
+        else parts.push("cleanupOrphans");
+        return `import { ${parts.join(", ")} } from './container-runtime.js';`;
+      },
     );
   }
   return content;
