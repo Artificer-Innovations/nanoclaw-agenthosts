@@ -40,10 +40,15 @@ describe("patchContainerRunner", () => {
       "import { registerRuntimeDriver, resolveRuntimeDriver, resolveRuntimeName, setContainerConfigReader, setSessionTransportResolver } from './agenthosts.js';",
       "import { registerRuntimeDriver, resolveRuntimeDriver, setContainerConfigReader } from './agenthosts.js';",
     );
-    expect(staleImport).not.toContain("resolveRuntimeName");
+    expect(staleImport).toContain(
+      "import { registerRuntimeDriver, resolveRuntimeDriver, setContainerConfigReader } from './agenthosts.js';",
+    );
+    expect(staleImport).not.toMatch(
+      /import \{[^}]*\bresolveRuntimeName\b[^}]*\} from '\.\/agenthosts\.js'/,
+    );
     const upgraded = patchContainerRunner(staleImport);
-    expect(upgraded).toContain(
-      "import { registerRuntimeDriver, resolveRuntimeDriver, resolveRuntimeName, setContainerConfigReader, setSessionTransportResolver } from './agenthosts.js';",
+    expect(upgraded).toMatch(
+      /import \{[^}]*\bresolveRuntimeName\b[^}]*\bsetSessionTransportResolver\b[^}]*\} from '\.\/agenthosts\.js'/,
     );
     expect(upgraded).toContain("const runtime = resolveRuntimeName(session);");
     expect(patchContainerRunner(upgraded)).toBe(upgraded);
