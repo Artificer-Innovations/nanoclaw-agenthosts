@@ -583,6 +583,48 @@ ${END("delivery-heal-import")}
     ).toThrow(/Could not scavenge unmarked pollActive heal/);
   });
 
+  it("scavenges unmarked heal when the Runtime drivers comment was edited", () => {
+    const unmarked = fixtureSources.delivery.replace(
+      `    const sessions = getRunningSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+      `    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    // custom comment — not the stock Runtime drivers text
+    for (const session of getActiveSessions()) {
+      if (seen.has(session.id)) continue;
+      if (!isContainerRunning(session.id)) continue;
+      markContainerRunning(session.id);
+      sessions.push(session);
+      seen.add(session.id);
+    }
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+    );
+    const cleaned = scavengeUnmarkedPollActiveHeal(unmarked);
+    expect(cleaned).not.toContain("markContainerRunning(session.id)");
+    expect(cleaned).toContain("await deliverSessionMessages(session)");
+  });
+
+  it("restoreStockPollActiveBody does not double-insert when drain already exists", () => {
+    const withDrain = `import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+async function pollActive(): Promise<void> {
+  try {
+    const sessions = getRunningSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+  } catch {}
+}
+`;
+    const restored = unpatchDelivery(withDrain);
+    expect(restored.split("await deliverSessionMessages").length - 1).toBe(1);
+  });
+
   it("scavengeUnmarkedPollActiveHeal is a no-op when heal is marked", () => {
     const marked = patchDelivery(fixtureSources.delivery);
     expect(scavengeUnmarkedPollActiveHeal(marked)).toBe(marked);

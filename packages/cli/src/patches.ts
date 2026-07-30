@@ -1057,8 +1057,10 @@ const UNMARKED_CONTAINER_RUNNING_IMPORT =
 export function scavengeUnmarkedPollActiveHeal(source: string): string {
   if (source.includes(begin("delivery-pollactive-heal"))) return source;
   if (!source.includes("markContainerRunning(session.id)")) return source;
+  // Anchor on the heal loop (getActiveSessions + markContainerRunning), not the
+  // comment text — hand hotfixes often edit/drop the comment.
   const pattern =
-    /    const sessions = getRunningSessions\(\);\r?\n    const seen = new Set\(sessions\.map\(\(s\) => s\.id\)\);\r?\n    \/\/ Runtime drivers[\s\S]*?markContainerRunning\(session\.id\);[\s\S]*?for \(const session of sessions\) \{\r?\n      await deliverSessionMessages\(session\);\r?\n    \}\r?\n/;
+    /    const sessions = getRunningSessions\(\);\r?\n    const seen = new Set\(sessions\.map\(\(s\) => s\.id\)\);\r?\n(?:    \/\/[^\n]*\r?\n)*    for \(const session of getActiveSessions\(\)\) \{\r?\n[\s\S]*?markContainerRunning\(session\.id\);[\s\S]*?for \(const session of sessions\) \{\r?\n      await deliverSessionMessages\(session\);\r?\n    \}\r?\n/;
   const next = source.replace(pattern, STOCK_POLLACTIVE_BODY);
   if (next === source) {
     throw new Error(
@@ -1094,13 +1096,17 @@ function normalizeDeliveryImports(content: string): string {
 function restoreStockPollActiveBody(content: string): string {
   if (content.includes(STOCK_POLLACTIVE_BODY.trim())) return content;
   if (!content.includes("async function pollActive()")) return content;
-  const anchor = "async function pollActive(): Promise<void> {";
-  const start = content.indexOf(anchor);
-  /* v8 ignore next 3 — callers only reach here when pollActive exists without stock body */
-  if (start < 0) {
+  // Formatting-tolerant: any drain that already calls deliverSessionMessages
+  // inside pollActive means stock (or equivalent) is present — don't double-insert.
+  const pollStart = content.search(/async function pollActive\s*\([^)]*\)[^{]*\{/);
+  if (pollStart < 0) {
     throw new Error("Could not restore stock pollActive: signature missing");
   }
-  const tryIdx = content.indexOf("try {", start);
+  const afterPoll = content.slice(pollStart);
+  if (/await\s+deliverSessionMessages\s*\(/.test(afterPoll)) {
+    return content;
+  }
+  const tryIdx = content.indexOf("try {", pollStart);
   if (tryIdx < 0) {
     throw new Error("Could not restore stock pollActive: try block missing");
   }
