@@ -11,4 +11,6 @@ Uninstall **dependent agenthost plugins first**, then this substrate:
 
 After uninstall, all groups fall back to stock Docker wake/kill (no registry). Clear any `container_configs.runtime` / `session_transport` values you no longer need.
 
+Uninstall also removes `@nanoclaw-agenthosts:delivery-*` markers from `src/delivery.ts` (pollActive heal) and scavenges unmarked `markContainerRunning` heal hotfixes back to stock `getRunningSessions`-only polling.
+
 `src/warn-once.ts` is shared with `nanoclaw-hosthooks`. Uninstall leaves it in place when `src/hosthooks.ts` is present; otherwise it is removed.

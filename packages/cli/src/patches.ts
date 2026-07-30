@@ -1015,6 +1015,178 @@ export function unpatchGroupsCli(source: string): string {
   return content;
 }
 
+/** Stock pollActive drain loop (DB container_status only). */
+export const STOCK_POLLACTIVE_BODY = `    const sessions = getRunningSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`;
+
+/**
+ * Heal DB status when a runtime driver is live in-memory but sessions still
+ * say `stopped` — otherwise outbound waits on the 60s sweep.
+ */
+export const PATCHED_POLLACTIVE_BODY = `    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    // Runtime drivers (esp. fly) can be live in-memory while DB still says
+    // \`stopped\` — heal and include them so outbound isn't stuck on the 60s sweep.
+    for (const session of getActiveSessions()) {
+      if (seen.has(session.id)) continue;
+      if (!isContainerRunning(session.id)) continue;
+      markContainerRunning(session.id);
+      sessions.push(session);
+      seen.add(session.id);
+    }
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`;
+
+const STOCK_SESSION_MANAGER_IMPORT =
+  "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';";
+const PATCHED_SESSION_MANAGER_IMPORT =
+  "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from './session-manager.js';";
+
+const UNMARKED_CONTAINER_RUNNING_IMPORT =
+  "import { isContainerRunning } from './container-runner.js';\n";
+
+/**
+ * Replace unmarked pollActive heal hotfixes with the stock drain loop.
+ * No-op when the marked delivery-pollactive-heal block is present.
+ */
+export function scavengeUnmarkedPollActiveHeal(source: string): string {
+  if (source.includes(begin("delivery-pollactive-heal"))) return source;
+  if (!source.includes("markContainerRunning(session.id)")) return source;
+  const pattern =
+    /    const sessions = getRunningSessions\(\);\r?\n    const seen = new Set\(sessions\.map\(\(s\) => s\.id\)\);\r?\n    \/\/ Runtime drivers[\s\S]*?markContainerRunning\(session\.id\);[\s\S]*?for \(const session of sessions\) \{\r?\n      await deliverSessionMessages\(session\);\r?\n    \}\r?\n/;
+  const next = source.replace(pattern, STOCK_POLLACTIVE_BODY);
+  if (next === source) {
+    throw new Error(
+      "Could not scavenge unmarked pollActive heal (markContainerRunning present but pattern mismatch)",
+    );
+  }
+  return next;
+}
+
+function normalizeDeliveryImports(content: string): string {
+  let next = content;
+  // Unmarked hotfix widened session-manager import — restore stock when heal is gone.
+  if (
+    !next.includes(begin("delivery-heal-session-import")) &&
+    !next.includes("markContainerRunning(session.id)")
+  ) {
+    next = next.replace(
+      /import \{ clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning \} from '\.\/session-manager\.js';/,
+      STOCK_SESSION_MANAGER_IMPORT,
+    );
+  }
+  // Drop unmarked isContainerRunning import when heal body is gone.
+  if (
+    !next.includes(begin("delivery-heal-import")) &&
+    !next.includes("isContainerRunning(session.id)") &&
+    next.includes(UNMARKED_CONTAINER_RUNNING_IMPORT)
+  ) {
+    next = next.replace(UNMARKED_CONTAINER_RUNNING_IMPORT, "");
+  }
+  return next;
+}
+
+function restoreStockPollActiveBody(content: string): string {
+  if (content.includes(STOCK_POLLACTIVE_BODY.trim())) return content;
+  if (!content.includes("async function pollActive()")) return content;
+  const anchor = "async function pollActive(): Promise<void> {";
+  const start = content.indexOf(anchor);
+  if (start < 0) {
+    throw new Error("Could not restore stock pollActive: signature missing");
+  }
+  const tryIdx = content.indexOf("try {", start);
+  if (tryIdx < 0) {
+    throw new Error("Could not restore stock pollActive: try block missing");
+  }
+  let at = tryIdx + "try {".length;
+  if (content[at] === "\r") at += 1;
+  if (content[at] === "\n") at += 1;
+  return `${content.slice(0, at)}${STOCK_POLLACTIVE_BODY}${content.slice(at)}`;
+}
+
+export function patchDelivery(source: string): string {
+  const names = [
+    "delivery-heal-import",
+    "delivery-heal-session-import",
+    "delivery-pollactive-heal",
+  ];
+  let content = source;
+
+  const present = names.filter((name) => content.includes(begin(name)));
+  if (present.length > 0 && present.length < names.length) {
+    content = unpatchDelivery(content);
+  } else if (
+    content.includes("markContainerRunning(session.id)") &&
+    !content.includes(begin("delivery-pollactive-heal"))
+  ) {
+    content = unpatchDelivery(content);
+  }
+
+  if (isFullyPatched(content, names)) return content;
+
+  content = installImport(
+    content,
+    "./container-runner.js",
+    ["isContainerRunning"],
+    "delivery-heal-import",
+  );
+
+  if (!content.includes(begin("delivery-heal-session-import"))) {
+    content = replaceOnce(
+      content,
+      STOCK_SESSION_MANAGER_IMPORT,
+      marked("delivery-heal-session-import", PATCHED_SESSION_MANAGER_IMPORT),
+      "delivery session-manager import",
+    );
+  }
+
+  content = scavengeUnmarkedPollActiveHeal(content);
+  if (!content.includes(begin("delivery-pollactive-heal"))) {
+    content = replaceOnce(
+      content,
+      STOCK_POLLACTIVE_BODY,
+      marked("delivery-pollactive-heal", PATCHED_POLLACTIVE_BODY),
+      "delivery pollActive heal",
+    );
+  }
+
+  return content;
+}
+
+export function unpatchDelivery(source: string): string {
+  let content = source;
+  content = removeMarkedBlock(content, "delivery-pollactive-heal");
+  content = removeMarkedBlock(content, "delivery-heal-session-import");
+  content = removeMarkedBlock(content, "delivery-heal-import");
+  content = scavengeUnmarkedPollActiveHeal(content);
+  content = restoreStockPollActiveBody(content);
+  content = normalizeDeliveryImports(content);
+  if (
+    !content.includes(STOCK_SESSION_MANAGER_IMPORT) &&
+    !content.includes("from './session-manager.js'")
+  ) {
+    const typing = "import { pauseTypingRefreshAfterDelivery";
+    const typingIdx = content.indexOf(typing);
+    if (typingIdx >= 0) {
+      content = `${content.slice(0, typingIdx)}${STOCK_SESSION_MANAGER_IMPORT}\n${content.slice(typingIdx)}`;
+    } else {
+      const firstImport = content.search(/^import /m);
+      if (firstImport < 0) {
+        throw new Error(
+          "Could not restore stock session-manager import after delivery uninstall",
+        );
+      }
+      content = `${content.slice(0, firstImport)}${STOCK_SESSION_MANAGER_IMPORT}\n${content.slice(firstImport)}`;
+    }
+  }
+  return content;
+}
+
 export const FILE_TRANSFORMS: FileTransform[] = [
   {
     path: "src/container-runner.ts",
@@ -1045,5 +1217,10 @@ export const FILE_TRANSFORMS: FileTransform[] = [
     path: "src/cli/resources/groups.ts",
     transform: patchGroupsCli,
     uninstall: unpatchGroupsCli,
+  },
+  {
+    path: "src/delivery.ts",
+    transform: patchDelivery,
+    uninstall: unpatchDelivery,
   },
 ];

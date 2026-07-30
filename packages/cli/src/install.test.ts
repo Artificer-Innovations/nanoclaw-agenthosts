@@ -86,6 +86,13 @@ describe("install / verify / uninstall", () => {
     );
     expect(stockRunner).toContain("export function wakeContainer");
     expect(stockRunner).not.toContain("@nanoclaw-agenthosts:");
+
+    const delivery = fs.readFileSync(
+      path.join(root, "src/delivery.ts"),
+      "utf8",
+    );
+    expect(delivery).not.toContain("@nanoclaw-agenthosts:");
+    expect(delivery).not.toContain("markContainerRunning");
   });
 
   it("preserves warn-once.ts on uninstall when hosthooks is present", () => {

@@ -200,6 +200,45 @@ function getAgentGroupByFolder(folder: string): AgentGroup {
   return { id: 'ag-test', name: folder, folder, agent_provider: null, created_at: '' };
 }
 `,
+
+  delivery: `import {
+  getRunningSessions,
+  getActiveSessions,
+} from './db/sessions.js';
+import { log } from './log.js';
+import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
+
+const ACTIVE_POLL_MS = 1000;
+let activePolling = false;
+
+async function deliverSessionMessages(session: { id: string }): Promise<void> {
+  void session;
+}
+
+async function pollActive(): Promise<void> {
+  if (!activePolling) return;
+
+  try {
+    const sessions = getRunningSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+  } catch (err) {
+    log.error('Active delivery poll error', { err });
+  }
+
+  setTimeout(pollActive, ACTIVE_POLL_MS);
+}
+
+void pauseTypingRefreshAfterDelivery;
+void setTypingAdapter;
+void clearOutbox;
+void openInboundDb;
+void openOutboundDb;
+void readOutboxFiles;
+void getActiveSessions;
+`,
 };
 
 export function writeFixtureTree(
@@ -223,6 +262,7 @@ export function writeFixtureTree(
 }
 `,
     "src/cli/resources/groups.ts": fixtureSources.groups,
+    "src/delivery.ts": fixtureSources.delivery,
   };
   for (const [relative, content] of Object.entries(files)) {
     const absolute = path.join(root, relative);

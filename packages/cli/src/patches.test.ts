@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   patchContainerConfigsDb,
   patchContainerRunner,
+  patchDelivery,
   patchGroupsCli,
   patchIndex,
   patchMigrationsIndex,
   patchTypes,
+  scavengeUnmarkedPollActiveHeal,
   unpatchContainerConfigsDb,
   unpatchContainerRunner,
+  unpatchDelivery,
   unpatchGroupsCli,
   unpatchIndex,
   unpatchMigrationsIndex,
@@ -481,6 +484,78 @@ ${END("types-runtime-fields")}`,
       "initGroupFilesystem(group);\n        return getAgentGroupByFolder(folder);",
     );
     expect(restored).not.toContain("listRegisteredRuntimes");
+  });
+});
+
+describe("patchDelivery", () => {
+  it("marks pollActive heal and is idempotent", () => {
+    const once = patchDelivery(fixtureSources.delivery);
+    expect(once).toContain(
+      "@nanoclaw-agenthosts:delivery-pollactive-heal:begin",
+    );
+    expect(once).toContain("markContainerRunning(session.id)");
+    expect(once).toContain("isContainerRunning");
+    expect(once).toContain("delivery-heal-import");
+    expect(once).toContain("delivery-heal-session-import");
+    expect(patchDelivery(once)).toBe(once);
+  });
+
+  it("uninstall restores stock pollActive without heal leftovers", () => {
+    const restored = unpatchDelivery(patchDelivery(fixtureSources.delivery));
+    expect(restored).not.toContain("@nanoclaw-agenthosts:delivery-");
+    expect(restored).not.toContain("markContainerRunning");
+    expect(restored).not.toContain("isContainerRunning");
+    expect(restored).toContain(
+      "const sessions = getRunningSessions();\n    for (const session of sessions) {",
+    );
+    expect(restored).toContain(
+      "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+    );
+  });
+
+  it("scavenges unmarked pollActive heal hotfixes", () => {
+    const unmarked = fixtureSources.delivery
+      .replace(
+        "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+        "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from './session-manager.js';\nimport { isContainerRunning } from './container-runner.js';",
+      )
+      .replace(
+        `    const sessions = getRunningSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+        `    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    // Runtime drivers (esp. fly) can be live in-memory while DB still says
+    // \`stopped\` — heal and include them so outbound isn't stuck on the 60s sweep.
+    for (const session of getActiveSessions()) {
+      if (seen.has(session.id)) continue;
+      if (!isContainerRunning(session.id)) continue;
+      markContainerRunning(session.id);
+      sessions.push(session);
+      seen.add(session.id);
+    }
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+      );
+    const cleaned = scavengeUnmarkedPollActiveHeal(unmarked);
+    expect(cleaned).not.toContain("markContainerRunning(session.id)");
+    expect(cleaned).toContain(
+      "const sessions = getRunningSessions();\n    for (const session of sessions) {",
+    );
+
+    const restored = unpatchDelivery(unmarked);
+    expect(restored).not.toContain("markContainerRunning");
+    expect(restored).not.toContain("isContainerRunning");
+
+    const upgraded = patchDelivery(unmarked);
+    expect(upgraded).toContain(
+      "@nanoclaw-agenthosts:delivery-pollactive-heal:begin",
+    );
+    expect(upgraded).toContain("markContainerRunning(session.id)");
   });
 });
 
