@@ -1152,7 +1152,8 @@ export function patchDelivery(source: string): string {
     content = replaceOnce(
       content,
       STOCK_POLLACTIVE_BODY,
-      marked("delivery-pollactive-heal", PATCHED_POLLACTIVE_BODY),
+      // Trailing newline so `} catch` stays on the next line (marked() has none).
+      `${marked("delivery-pollactive-heal", PATCHED_POLLACTIVE_BODY)}\n`,
       "delivery pollActive heal",
     );
   }

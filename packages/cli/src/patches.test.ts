@@ -488,6 +488,14 @@ ${END("types-runtime-fields")}`,
 });
 
 describe("patchDelivery", () => {
+  it("keeps } catch on its own line after pollActive heal patch", () => {
+    const once = patchDelivery(fixtureSources.delivery);
+    expect(once).toMatch(
+      /@nanoclaw-agenthosts:delivery-pollactive-heal:end\n  \} catch/,
+    );
+    expect(once).not.toMatch(/delivery-pollactive-heal:end  \} catch/);
+  });
+
   it("marks pollActive heal and is idempotent", () => {
     const once = patchDelivery(fixtureSources.delivery);
     expect(once).toContain(
