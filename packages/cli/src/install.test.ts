@@ -249,6 +249,33 @@ describe("install / verify / uninstall", () => {
     }
   });
 
+  it("rollback deletes newly created files (previous === null)", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    const original = fs.renameSync;
+    let sawNew = false;
+    let failed = false;
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      const result = original(from, to);
+      const dest = String(to);
+      if (dest.endsWith("src/agenthosts.ts")) {
+        sawNew = true;
+        return result;
+      }
+      if (sawNew && !failed) {
+        failed = true;
+        throw new Error("fail-after-new-file");
+      }
+      return result;
+    });
+    try {
+      expect(() => runInstall(root)).toThrow(/fail-after-new-file/);
+      expect(fs.existsSync(path.join(root, "src/agenthosts.ts"))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("preserves the original error when rollback also fails", () => {
     const root = tempRoot();
     writeFixtureTree(root, fs, path);

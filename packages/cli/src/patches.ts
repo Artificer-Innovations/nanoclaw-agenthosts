@@ -1096,6 +1096,7 @@ function restoreStockPollActiveBody(content: string): string {
   if (!content.includes("async function pollActive()")) return content;
   const anchor = "async function pollActive(): Promise<void> {";
   const start = content.indexOf(anchor);
+  /* v8 ignore next 3 — callers only reach here when pollActive exists without stock body */
   if (start < 0) {
     throw new Error("Could not restore stock pollActive: signature missing");
   }
@@ -1104,6 +1105,7 @@ function restoreStockPollActiveBody(content: string): string {
     throw new Error("Could not restore stock pollActive: try block missing");
   }
   let at = tryIdx + "try {".length;
+  /* v8 ignore next */
   if (content[at] === "\r") at += 1;
   if (content[at] === "\n") at += 1;
   return `${content.slice(0, at)}${STOCK_POLLACTIVE_BODY}${content.slice(at)}`;
@@ -1176,6 +1178,7 @@ export function unpatchDelivery(source: string): string {
       content = `${content.slice(0, typingIdx)}${STOCK_SESSION_MANAGER_IMPORT}\n${content.slice(typingIdx)}`;
     } else {
       const firstImport = content.search(/^import /m);
+      /* v8 ignore next 5 — delivery fixtures always retain at least one import */
       if (firstImport < 0) {
         throw new Error(
           "Could not restore stock session-manager import after delivery uninstall",

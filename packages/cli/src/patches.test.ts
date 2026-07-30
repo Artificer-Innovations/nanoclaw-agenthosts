@@ -557,6 +557,66 @@ describe("patchDelivery", () => {
     );
     expect(upgraded).toContain("markContainerRunning(session.id)");
   });
+
+  it("upgrades partial delivery heal markers", () => {
+    const partial = `${fixtureSources.delivery}
+${BEGIN("delivery-heal-import")}
+import { isContainerRunning } from './container-runner.js';
+${END("delivery-heal-import")}
+`;
+    const upgraded = patchDelivery(partial);
+    expect(upgraded).toContain("delivery-pollactive-heal:begin");
+    expect(upgraded).toContain("delivery-heal-session-import:begin");
+  });
+
+  it("scavengeUnmarkedPollActiveHeal throws on pattern mismatch", () => {
+    expect(() =>
+      scavengeUnmarkedPollActiveHeal("markContainerRunning(session.id);\n"),
+    ).toThrow(/Could not scavenge unmarked pollActive heal/);
+  });
+
+  it("scavengeUnmarkedPollActiveHeal is a no-op when heal is marked", () => {
+    const marked = patchDelivery(fixtureSources.delivery);
+    expect(scavengeUnmarkedPollActiveHeal(marked)).toBe(marked);
+  });
+
+  it("restoreStockPollActiveBody no-ops without pollActive", () => {
+    expect(unpatchDelivery("import fs from 'fs';\n")).toContain(
+      "from './session-manager.js'",
+    );
+  });
+
+  it("unpatchDelivery restores session-manager import via firstImport fallback", () => {
+    const minimal = `${BEGIN("delivery-heal-session-import")}
+import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from './session-manager.js';
+${END("delivery-heal-session-import")}
+import { getRunningSessions } from './db/sessions.js';
+
+async function pollActive(): Promise<void> {
+  try {
+${BEGIN("delivery-pollactive-heal")}
+    const sessions = getRunningSessions();
+${END("delivery-pollactive-heal")}
+  } catch {}
+}
+`;
+    const restored = unpatchDelivery(minimal);
+    expect(restored).toContain(
+      "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+    );
+  });
+
+  it("restoreStockPollActiveBody throws without try block", () => {
+    expect(() =>
+      unpatchDelivery(`${BEGIN("delivery-pollactive-heal")}
+x
+${END("delivery-pollactive-heal")}
+async function pollActive(): Promise<void> {
+  // no try
+}
+`),
+    ).toThrow(/try block missing/);
+  });
 });
 
 describe("partial markers and anchors", () => {
