@@ -468,6 +468,10 @@ export function unpatchContainerRunner(source: string): string {
     content = content.replace(PATCHED_RUNTIME_IMPORT, STOCK_RUNTIME_IMPORT);
   }
 
+  // Marked-block removal can leave runs of blank lines where rename/export
+  // wrappers lived — collapse so uninstall is closer to stock layout.
+  content = content.replace(/\n{3,}/g, "\n\n");
+
   return content;
 }
 
@@ -1095,24 +1099,30 @@ function normalizeDeliveryImports(content: string): string {
 
 function restoreStockPollActiveBody(content: string): string {
   if (content.includes(STOCK_POLLACTIVE_BODY.trim())) return content;
-  if (!content.includes("async function pollActive()")) return content;
-  // Formatting-tolerant: any drain that already calls deliverSessionMessages
-  // inside pollActive means stock (or equivalent) is present — don't double-insert.
-  const pollStart = content.search(
-    /async function pollActive\s*\([^)]*\)[^{]*\{/,
-  );
+  if (!content.includes("async function pollActive")) return content;
+  // Scope to the pollActive function only — pollSweep (later in the file) also
+  // calls deliverSessionMessages; matching past pollActive falsely no-ops and
+  // leaves an empty try {} after marked-heal removal.
+  const pollStart = content.indexOf("async function pollActive");
+  /* v8 ignore next 3 */
   if (pollStart < 0) {
     throw new Error("Could not restore stock pollActive: signature missing");
   }
-  const afterPoll = content.slice(pollStart);
-  if (/await\s+deliverSessionMessages\s*\(/.test(afterPoll)) {
+  let pollEnd: number;
+  try {
+    pollEnd = endOfFunction(content, "async function pollActive");
+  } catch {
+    throw new Error("Could not restore stock pollActive: signature missing");
+  }
+  const pollFn = content.slice(pollStart, pollEnd);
+  if (/await\s+deliverSessionMessages\s*\(/.test(pollFn)) {
     return content;
   }
-  const tryIdx = content.indexOf("try {", pollStart);
-  if (tryIdx < 0) {
+  const tryRel = pollFn.indexOf("try {");
+  if (tryRel < 0) {
     throw new Error("Could not restore stock pollActive: try block missing");
   }
-  let at = tryIdx + "try {".length;
+  let at = pollStart + tryRel + "try {".length;
   /* v8 ignore next */
   if (content[at] === "\r") at += 1;
   if (content[at] === "\n") at += 1;

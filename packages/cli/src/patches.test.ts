@@ -627,6 +627,39 @@ async function pollActive(): Promise<void> {
     expect(restored).not.toContain("const sessions = getRunningSessions()");
   });
 
+  it("restoreStockPollActiveBody ignores deliverSessionMessages in pollSweep", () => {
+    // Regression: after removing the marked heal, pollActive's try is empty but
+    // pollSweep still awaits deliverSessionMessages — a file-wide scan must not
+    // treat that as "stock already present".
+    const emptyActive = `import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+async function pollActive(): Promise<void> {
+  if (!activePolling) return;
+  try {
+  } catch (err) {
+    log.error('Active delivery poll error', { err });
+  }
+  setTimeout(pollActive, ACTIVE_POLL_MS);
+}
+
+async function pollSweep(): Promise<void> {
+  try {
+    const sessions = getActiveSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+  } catch (err) {
+    log.error('Sweep delivery poll error', { err });
+  }
+}
+`;
+    const restored = unpatchDelivery(emptyActive);
+    expect(restored).toContain(
+      "const sessions = getRunningSessions();\n    for (const session of sessions) {\n      await deliverSessionMessages(session);\n    }",
+    );
+    // One in restored pollActive + one in pollSweep.
+    expect(restored.split("await deliverSessionMessages").length - 1).toBe(2);
+  });
+
   it("restoreStockPollActiveBody throws when pollActive signature is malformed", () => {
     expect(() =>
       unpatchDelivery(`async function pollActive()
