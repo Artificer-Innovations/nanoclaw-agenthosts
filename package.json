@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw-agenthosts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pluggable agent process lifecycle (RuntimeDriver registry) for NanoClaw",
   "type": "module",
   "license": "MIT",
