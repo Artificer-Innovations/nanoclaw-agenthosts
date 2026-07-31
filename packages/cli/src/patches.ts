@@ -1052,7 +1052,7 @@ const PATCHED_SESSION_MANAGER_IMPORT =
   "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from './session-manager.js';";
 
 const UNMARKED_CONTAINER_RUNNING_IMPORT =
-  "import { isContainerRunning } from './container-runner.js';\n";
+  /import \{ isContainerRunning \} from '\.\/container-runner\.js';\r?\n/;
 
 /**
  * Replace unmarked pollActive heal hotfixes with the stock drain loop.
@@ -1064,7 +1064,7 @@ export function scavengeUnmarkedPollActiveHeal(source: string): string {
   // Anchor on the heal loop (getActiveSessions + markContainerRunning), not the
   // comment text — hand hotfixes often edit/drop the comment.
   const pattern =
-    /    const sessions = getRunningSessions\(\);\r?\n    const seen = new Set\(sessions\.map\(\(s\) => s\.id\)\);\r?\n(?:    \/\/[^\n]*\r?\n)*    for \(const session of getActiveSessions\(\)\) \{\r?\n[\s\S]*?markContainerRunning\(session\.id\);[\s\S]*?for \(const session of sessions\) \{\r?\n      await deliverSessionMessages\(session\);\r?\n    \}\r?\n/;
+    /[ \t]*const sessions = getRunningSessions\(\);\r?\n[ \t]*const seen = new Set\(sessions\.map\(\(s\) => s\.id\)\);\r?\n(?:[ \t]*\/\/[^\n]*\r?\n)*[ \t]*for \(const session of getActiveSessions\(\)\) \{\r?\n[\s\S]*?markContainerRunning\(session\.id\);[\s\S]*?[ \t]*for \(const session of sessions\) \{\r?\n[ \t]*await deliverSessionMessages\(session\);\r?\n[ \t]*\}\r?\n/;
   const next = source.replace(pattern, STOCK_POLLACTIVE_BODY);
   if (next === source) {
     throw new Error(
@@ -1082,15 +1082,14 @@ function normalizeDeliveryImports(content: string): string {
     !next.includes("markContainerRunning(session.id)")
   ) {
     next = next.replace(
-      /import \{ clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning \} from '\.\/session-manager\.js';/,
+      /import\s*\{\s*clearOutbox\s*,\s*openInboundDb\s*,\s*openOutboundDb\s*,\s*readOutboxFiles\s*,\s*markContainerRunning\s*\}\s*from\s*['"]\.\/session-manager\.js['"]\s*;/,
       STOCK_SESSION_MANAGER_IMPORT,
     );
   }
   // Drop unmarked isContainerRunning import when heal body is gone.
   if (
     !next.includes(begin("delivery-heal-import")) &&
-    !next.includes("isContainerRunning(session.id)") &&
-    next.includes(UNMARKED_CONTAINER_RUNNING_IMPORT)
+    !next.includes("isContainerRunning(session.id)")
   ) {
     next = next.replace(UNMARKED_CONTAINER_RUNNING_IMPORT, "");
   }
