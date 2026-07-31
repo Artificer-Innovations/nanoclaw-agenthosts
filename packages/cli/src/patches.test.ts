@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   patchContainerConfigsDb,
   patchContainerRunner,
+  patchDelivery,
   patchGroupsCli,
   patchIndex,
   patchMigrationsIndex,
   patchTypes,
+  scavengeUnmarkedPollActiveHeal,
   unpatchContainerConfigsDb,
   unpatchContainerRunner,
+  unpatchDelivery,
   unpatchGroupsCli,
   unpatchIndex,
   unpatchMigrationsIndex,
@@ -481,6 +484,231 @@ ${END("types-runtime-fields")}`,
       "initGroupFilesystem(group);\n        return getAgentGroupByFolder(folder);",
     );
     expect(restored).not.toContain("listRegisteredRuntimes");
+  });
+});
+
+describe("patchDelivery", () => {
+  it("keeps } catch on its own line after pollActive heal patch", () => {
+    const once = patchDelivery(fixtureSources.delivery);
+    expect(once).toMatch(
+      /@nanoclaw-agenthosts:delivery-pollactive-heal:end\n  \} catch/,
+    );
+    expect(once).not.toMatch(/delivery-pollactive-heal:end  \} catch/);
+  });
+
+  it("marks pollActive heal and is idempotent", () => {
+    const once = patchDelivery(fixtureSources.delivery);
+    expect(once).toContain(
+      "@nanoclaw-agenthosts:delivery-pollactive-heal:begin",
+    );
+    expect(once).toContain("markContainerRunning(session.id)");
+    expect(once).toContain("isContainerRunning");
+    expect(once).toContain("delivery-heal-import");
+    expect(once).toContain("delivery-heal-session-import");
+    expect(patchDelivery(once)).toBe(once);
+  });
+
+  it("uninstall restores stock pollActive without heal leftovers", () => {
+    const restored = unpatchDelivery(patchDelivery(fixtureSources.delivery));
+    expect(restored).not.toContain("@nanoclaw-agenthosts:delivery-");
+    expect(restored).not.toContain("markContainerRunning");
+    expect(restored).not.toContain("isContainerRunning");
+    expect(restored).toContain(
+      "const sessions = getRunningSessions();\n    for (const session of sessions) {",
+    );
+    expect(restored).toContain(
+      "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+    );
+  });
+
+  it("scavenges unmarked pollActive heal hotfixes", () => {
+    const unmarked = fixtureSources.delivery
+      .replace(
+        "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+        "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from './session-manager.js';\nimport { isContainerRunning } from './container-runner.js';",
+      )
+      .replace(
+        `    const sessions = getRunningSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+        `    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    // Runtime drivers (esp. fly) can be live in-memory while DB still says
+    // \`stopped\` — heal and include them so outbound isn't stuck on the 60s sweep.
+    for (const session of getActiveSessions()) {
+      if (seen.has(session.id)) continue;
+      if (!isContainerRunning(session.id)) continue;
+      markContainerRunning(session.id);
+      sessions.push(session);
+      seen.add(session.id);
+    }
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+      );
+    const cleaned = scavengeUnmarkedPollActiveHeal(unmarked);
+    expect(cleaned).not.toContain("markContainerRunning(session.id)");
+    expect(cleaned).toContain(
+      "const sessions = getRunningSessions();\n    for (const session of sessions) {",
+    );
+
+    const restored = unpatchDelivery(unmarked);
+    expect(restored).not.toContain("markContainerRunning");
+    expect(restored).not.toContain("isContainerRunning");
+
+    const upgraded = patchDelivery(unmarked);
+    expect(upgraded).toContain(
+      "@nanoclaw-agenthosts:delivery-pollactive-heal:begin",
+    );
+    expect(upgraded).toContain("markContainerRunning(session.id)");
+  });
+
+  it("upgrades partial delivery heal markers", () => {
+    const partial = `${fixtureSources.delivery}
+${BEGIN("delivery-heal-import")}
+import { isContainerRunning } from './container-runner.js';
+${END("delivery-heal-import")}
+`;
+    const upgraded = patchDelivery(partial);
+    expect(upgraded).toContain("delivery-pollactive-heal:begin");
+    expect(upgraded).toContain("delivery-heal-session-import:begin");
+  });
+
+  it("scavengeUnmarkedPollActiveHeal throws on pattern mismatch", () => {
+    expect(() =>
+      scavengeUnmarkedPollActiveHeal("markContainerRunning(session.id);\n"),
+    ).toThrow(/Could not scavenge unmarked pollActive heal/);
+  });
+
+  it("scavenges unmarked heal when the Runtime drivers comment was edited", () => {
+    const unmarked = fixtureSources.delivery.replace(
+      `    const sessions = getRunningSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+      `    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    // custom comment — not the stock Runtime drivers text
+    for (const session of getActiveSessions()) {
+      if (seen.has(session.id)) continue;
+      if (!isContainerRunning(session.id)) continue;
+      markContainerRunning(session.id);
+      sessions.push(session);
+      seen.add(session.id);
+    }
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+`,
+    );
+    const cleaned = scavengeUnmarkedPollActiveHeal(unmarked);
+    expect(cleaned).not.toContain("markContainerRunning(session.id)");
+    expect(cleaned).toContain("await deliverSessionMessages(session)");
+  });
+
+  it("restoreStockPollActiveBody does not double-insert when drain already exists", () => {
+    // Shape differs from STOCK_POLLACTIVE_BODY so we exercise the
+    // deliverSessionMessages early-return (not the exact-stock includes check).
+    const withDrain = `import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+async function pollActive(): Promise<void> {
+  try {
+    for (const session of getRunningSessions()) {
+      await deliverSessionMessages(session);
+    }
+  } catch {}
+}
+`;
+    const restored = unpatchDelivery(withDrain);
+    expect(restored.split("await deliverSessionMessages").length - 1).toBe(1);
+    expect(restored).not.toContain("const sessions = getRunningSessions()");
+  });
+
+  it("restoreStockPollActiveBody ignores deliverSessionMessages in pollSweep", () => {
+    // Regression: after removing the marked heal, pollActive's try is empty but
+    // pollSweep still awaits deliverSessionMessages — a file-wide scan must not
+    // treat that as "stock already present".
+    const emptyActive = `import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+async function pollActive(): Promise<void> {
+  if (!activePolling) return;
+  try {
+  } catch (err) {
+    log.error('Active delivery poll error', { err });
+  }
+  setTimeout(pollActive, ACTIVE_POLL_MS);
+}
+
+async function pollSweep(): Promise<void> {
+  try {
+    const sessions = getActiveSessions();
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+  } catch (err) {
+    log.error('Sweep delivery poll error', { err });
+  }
+}
+`;
+    const restored = unpatchDelivery(emptyActive);
+    expect(restored).toContain(
+      "const sessions = getRunningSessions();\n    for (const session of sessions) {\n      await deliverSessionMessages(session);\n    }",
+    );
+    // One in restored pollActive + one in pollSweep.
+    expect(restored.split("await deliverSessionMessages").length - 1).toBe(2);
+  });
+
+  it("restoreStockPollActiveBody throws when pollActive signature is malformed", () => {
+    expect(() =>
+      unpatchDelivery(`async function pollActive()
+// declared but opening brace never appears
+`),
+    ).toThrow(/signature missing/);
+  });
+
+  it("scavengeUnmarkedPollActiveHeal is a no-op when heal is marked", () => {
+    const marked = patchDelivery(fixtureSources.delivery);
+    expect(scavengeUnmarkedPollActiveHeal(marked)).toBe(marked);
+  });
+
+  it("restoreStockPollActiveBody no-ops without pollActive", () => {
+    expect(unpatchDelivery("import fs from 'fs';\n")).toContain(
+      "from './session-manager.js'",
+    );
+  });
+
+  it("unpatchDelivery restores session-manager import via firstImport fallback", () => {
+    const minimal = `${BEGIN("delivery-heal-session-import")}
+import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from './session-manager.js';
+${END("delivery-heal-session-import")}
+import { getRunningSessions } from './db/sessions.js';
+
+async function pollActive(): Promise<void> {
+  try {
+${BEGIN("delivery-pollactive-heal")}
+    const sessions = getRunningSessions();
+${END("delivery-pollactive-heal")}
+  } catch {}
+}
+`;
+    const restored = unpatchDelivery(minimal);
+    expect(restored).toContain(
+      "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+    );
+  });
+
+  it("restoreStockPollActiveBody throws without try block", () => {
+    expect(() =>
+      unpatchDelivery(`${BEGIN("delivery-pollactive-heal")}
+x
+${END("delivery-pollactive-heal")}
+async function pollActive(): Promise<void> {
+  // no try
+}
+`),
+    ).toThrow(/try block missing/);
   });
 });
 
