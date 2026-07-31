@@ -1098,7 +1098,9 @@ function restoreStockPollActiveBody(content: string): string {
   if (!content.includes("async function pollActive()")) return content;
   // Formatting-tolerant: any drain that already calls deliverSessionMessages
   // inside pollActive means stock (or equivalent) is present — don't double-insert.
-  const pollStart = content.search(/async function pollActive\s*\([^)]*\)[^{]*\{/);
+  const pollStart = content.search(
+    /async function pollActive\s*\([^)]*\)[^{]*\{/,
+  );
   if (pollStart < 0) {
     throw new Error("Could not restore stock pollActive: signature missing");
   }
