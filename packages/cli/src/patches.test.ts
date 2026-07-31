@@ -611,11 +611,12 @@ ${END("delivery-heal-import")}
   });
 
   it("restoreStockPollActiveBody does not double-insert when drain already exists", () => {
+    // Shape differs from STOCK_POLLACTIVE_BODY so we exercise the
+    // deliverSessionMessages early-return (not the exact-stock includes check).
     const withDrain = `import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 async function pollActive(): Promise<void> {
   try {
-    const sessions = getRunningSessions();
-    for (const session of sessions) {
+    for (const session of getRunningSessions()) {
       await deliverSessionMessages(session);
     }
   } catch {}
@@ -623,6 +624,15 @@ async function pollActive(): Promise<void> {
 `;
     const restored = unpatchDelivery(withDrain);
     expect(restored.split("await deliverSessionMessages").length - 1).toBe(1);
+    expect(restored).not.toContain("const sessions = getRunningSessions()");
+  });
+
+  it("restoreStockPollActiveBody throws when pollActive signature is malformed", () => {
+    expect(() =>
+      unpatchDelivery(`async function pollActive()
+// declared but opening brace never appears
+`),
+    ).toThrow(/signature missing/);
   });
 
   it("scavengeUnmarkedPollActiveHeal is a no-op when heal is marked", () => {
