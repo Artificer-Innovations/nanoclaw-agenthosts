@@ -1188,7 +1188,7 @@ export function unpatchDelivery(source: string): string {
   content = normalizeDeliveryImports(content);
   if (
     !content.includes(STOCK_SESSION_MANAGER_IMPORT) &&
-    !content.includes("from './session-manager.js'")
+    !/from\s*['"]\.\/session-manager\.js['"]/.test(content)
   ) {
     const typing = "import { pauseTypingRefreshAfterDelivery";
     const typingIdx = content.indexOf(typing);
