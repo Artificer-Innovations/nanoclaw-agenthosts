@@ -673,6 +673,97 @@ async function pollSweep(): Promise<void> {
     expect(scavengeUnmarkedPollActiveHeal(marked)).toBe(marked);
   });
 
+  it("scavenges unmarked heal with tab or non-4-space indentation", () => {
+    const tabHeal = `\tconst sessions = getRunningSessions();
+\tconst seen = new Set(sessions.map((s) => s.id));
+\tfor (const session of getActiveSessions()) {
+\t\tif (seen.has(session.id)) continue;
+\t\tif (!isContainerRunning(session.id)) continue;
+\t\tmarkContainerRunning(session.id);
+\t\tsessions.push(session);
+\t\tseen.add(session.id);
+\t}
+\tfor (const session of sessions) {
+\t\tawait deliverSessionMessages(session);
+\t}
+`;
+    const twoSpaceHeal = `  const sessions = getRunningSessions();
+  const seen = new Set(sessions.map((s) => s.id));
+  for (const session of getActiveSessions()) {
+    if (seen.has(session.id)) continue;
+    if (!isContainerRunning(session.id)) continue;
+    markContainerRunning(session.id);
+    sessions.push(session);
+    seen.add(session.id);
+  }
+  for (const session of sessions) {
+    await deliverSessionMessages(session);
+  }
+`;
+    for (const heal of [tabHeal, twoSpaceHeal]) {
+      const cleaned = scavengeUnmarkedPollActiveHeal(heal);
+      expect(cleaned).not.toContain("markContainerRunning(session.id)");
+      expect(cleaned).toContain(
+        "const sessions = getRunningSessions();\n    for (const session of sessions) {",
+      );
+    }
+  });
+
+  it("normalizes double-quoted widened session-manager import on uninstall", () => {
+    const unmarked = `import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from "./session-manager.js";
+async function pollActive(): Promise<void> {
+  try {
+    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    for (const session of getActiveSessions()) {
+      if (seen.has(session.id)) continue;
+      if (!isContainerRunning(session.id)) continue;
+      markContainerRunning(session.id);
+      sessions.push(session);
+      seen.add(session.id);
+    }
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+  } catch {}
+}
+`;
+    const restored = unpatchDelivery(unmarked);
+    expect(restored).toContain(
+      "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+    );
+    expect(restored).not.toContain("markContainerRunning");
+  });
+
+  it("removes CRLF unmarked isContainerRunning import on uninstall", () => {
+    const unmarked =
+      "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles, markContainerRunning } from './session-manager.js';\r\n" +
+      "import { isContainerRunning } from './container-runner.js';\r\n" +
+      `async function pollActive(): Promise<void> {
+  try {
+    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    for (const session of getActiveSessions()) {
+      if (seen.has(session.id)) continue;
+      if (!isContainerRunning(session.id)) continue;
+      markContainerRunning(session.id);
+      sessions.push(session);
+      seen.add(session.id);
+    }
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+  } catch {}
+}
+`;
+    const restored = unpatchDelivery(unmarked);
+    expect(restored).not.toContain("isContainerRunning");
+    expect(restored).not.toContain("markContainerRunning");
+    expect(restored).toContain(
+      "import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';",
+    );
+  });
+
   it("restoreStockPollActiveBody no-ops without pollActive", () => {
     expect(unpatchDelivery("import fs from 'fs';\n")).toContain(
       "from './session-manager.js'",
