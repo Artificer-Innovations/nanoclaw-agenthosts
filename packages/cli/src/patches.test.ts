@@ -764,6 +764,27 @@ async function pollActive(): Promise<void> {
     );
   });
 
+  it("unpatchDelivery does not duplicate double-quoted session-manager import", () => {
+    const withDouble = `import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from "./session-manager.js";
+import { getRunningSessions } from './db/sessions.js';
+
+async function pollActive(): Promise<void> {
+  try {
+    const sessions = getRunningSessions();
+    const seen = new Set(sessions.map((s) => s.id));
+    for (const session of sessions) {
+      await deliverSessionMessages(session);
+    }
+  } catch {}
+}
+`;
+    const restored = unpatchDelivery(withDouble);
+    const matches =
+      restored.match(/from\s*['"]\.\/session-manager\.js['"]/g) ?? [];
+    expect(matches).toHaveLength(1);
+    expect(restored).toContain('from "./session-manager.js"');
+  });
+
   it("restoreStockPollActiveBody no-ops without pollActive", () => {
     expect(unpatchDelivery("import fs from 'fs';\n")).toContain(
       "from './session-manager.js'",
