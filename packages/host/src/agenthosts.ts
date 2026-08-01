@@ -9,9 +9,111 @@ export interface SessionRef {
   agent_group_id: string;
 }
 
+/**
+ * Optional host/runtime status callback (agenttrace `publishRuntimeActivity`).
+ * `phase` stays a plain string — agenttrace is an optional peer, so we avoid a
+ * hard type dependency on its `RuntimeActivityPhase` union.
+ */
+export type RuntimeStatusFn = (
+  phase: string,
+  summary: string,
+  extra?: { state?: "started" | "progress" | "succeeded" | "failed" },
+) => void;
+
 export interface WakeContext {
+  /** Emit vendor-neutral runtime lifecycle status (preparing, starting, …). */
+  onStatus?: RuntimeStatusFn;
   /** Extensible bag for OneCLI / driver-specific wake helpers. */
   [key: string]: unknown;
+}
+
+/** Session fields needed to route runtime status to a messaging channel. */
+export interface RuntimeActivitySession {
+  id: string;
+  agent_group_id: string;
+  messaging_group_id?: string | null;
+  thread_id?: string | null;
+}
+
+/** Delay before coarse wake bookends emit — warm already-running hits stay quiet. */
+export const COARSE_WAKE_STATUS_MS = 250;
+
+/** Bound fire-and-forget publish so a hung agenttrace dispatch cannot pile up. */
+export const RUNTIME_STATUS_TIMEOUT_MS = 2_000;
+
+type RuntimeActivityModule = {
+  publishRuntimeActivity?: (
+    session: RuntimeActivitySession,
+    input: {
+      phase: string;
+      summary: string;
+      state?: "started" | "progress" | "succeeded" | "failed";
+    },
+  ) => Promise<void>;
+};
+
+let runtimeActivityImporter: (() => Promise<RuntimeActivityModule>) | null =
+  null;
+
+/** Test seam — inject a fake agenttrace lifecycle module. */
+export function setRuntimeActivityImporterForTests(
+  importer: (() => Promise<RuntimeActivityModule>) | null,
+): void {
+  runtimeActivityImporter = importer;
+}
+
+async function loadRuntimeActivityModule(): Promise<RuntimeActivityModule> {
+  if (runtimeActivityImporter) return runtimeActivityImporter();
+  // Non-literal import — agenttrace-lifecycle.js only exists after agenttrace
+  // install into a NanoClaw host; keep this optional without string codegen.
+  const modulePath = "./agenttrace-lifecycle.js";
+  return import(modulePath) as Promise<RuntimeActivityModule>;
+}
+
+/**
+ * Fire-and-forget runtime status via optional agenttrace.
+ * No-ops when agenttrace is not installed or disabled.
+ * Returns a promise for tests; production callers ignore it.
+ */
+export function emitRuntimeStatus(
+  session: RuntimeActivitySession,
+  phase: string,
+  summary: string,
+  extra?: { state?: "started" | "progress" | "succeeded" | "failed" },
+): Promise<void> {
+  return (async () => {
+    try {
+      const mod = await loadRuntimeActivityModule();
+      if (typeof mod.publishRuntimeActivity !== "function") return;
+      await Promise.race([
+        mod.publishRuntimeActivity(session, {
+          phase,
+          summary,
+          state: extra?.state,
+        }),
+        new Promise<never>((_, reject) => {
+          const t = setTimeout(
+            () => reject(new Error("runtime status publish timed out")),
+            RUNTIME_STATUS_TIMEOUT_MS,
+          );
+          t.unref?.();
+        }),
+      ]);
+    } catch {
+      // agenttrace not installed, timed out, or dispatch failed
+    }
+  })();
+}
+
+/** Build a WakeContext whose onStatus forwards to emitRuntimeStatus. */
+export function createWakeContext(
+  session: RuntimeActivitySession,
+): WakeContext {
+  return {
+    onStatus(phase, summary, extra) {
+      emitRuntimeStatus(session, phase, summary, extra);
+    },
+  };
 }
 
 export interface BuildOpts {
@@ -162,7 +264,12 @@ export async function runRuntimeOrphanCleanup(): Promise<void> {
 
 export function getAgenthostsCapabilities(): {
   apiVersion: typeof AGENTHOSTS_API_VERSION;
-  features: { runtimeDrivers: true; orphanCleanup: true; transportGuard: true };
+  features: {
+    runtimeDrivers: true;
+    orphanCleanup: true;
+    transportGuard: true;
+    runtimeStatus: true;
+  };
   counts: { drivers: number };
   runtimes: string[];
 } {
@@ -172,6 +279,7 @@ export function getAgenthostsCapabilities(): {
       runtimeDrivers: true,
       orphanCleanup: true,
       transportGuard: true,
+      runtimeStatus: true,
     },
     counts: { drivers: drivers.size },
     runtimes: listRegisteredRuntimes(),
@@ -213,6 +321,7 @@ export function resetAgenthostsForTests(): void {
   drivers.clear();
   containerConfigReader = null;
   sessionTransportResolver = null;
+  runtimeActivityImporter = null;
   delete process.env.NANOCLAW_DEFAULT_RUNTIME;
 }
 
