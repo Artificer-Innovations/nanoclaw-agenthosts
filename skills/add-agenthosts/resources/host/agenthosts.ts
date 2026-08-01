@@ -9,7 +9,11 @@ export interface SessionRef {
   agent_group_id: string;
 }
 
-/** Optional host/runtime status callback (agenttrace `publishRuntimeActivity`). */
+/**
+ * Optional host/runtime status callback (agenttrace `publishRuntimeActivity`).
+ * `phase` stays a plain string — agenttrace is an optional peer, so we avoid a
+ * hard type dependency on its `RuntimeActivityPhase` union.
+ */
 export type RuntimeStatusFn = (
   phase: string,
   summary: string,
@@ -33,6 +37,9 @@ export interface RuntimeActivitySession {
 
 /** Delay before coarse wake bookends emit — warm already-running hits stay quiet. */
 export const COARSE_WAKE_STATUS_MS = 250;
+
+/** Bound fire-and-forget publish so a hung agenttrace dispatch cannot pile up. */
+export const RUNTIME_STATUS_TIMEOUT_MS = 2_000;
 
 type RuntimeActivityModule = {
   publishRuntimeActivity?: (
@@ -78,13 +85,22 @@ export function emitRuntimeStatus(
     try {
       const mod = await loadRuntimeActivityModule();
       if (typeof mod.publishRuntimeActivity !== "function") return;
-      await mod.publishRuntimeActivity(session, {
-        phase,
-        summary,
-        state: extra?.state,
-      });
+      await Promise.race([
+        mod.publishRuntimeActivity(session, {
+          phase,
+          summary,
+          state: extra?.state,
+        }),
+        new Promise<never>((_, reject) => {
+          const t = setTimeout(
+            () => reject(new Error("runtime status publish timed out")),
+            RUNTIME_STATUS_TIMEOUT_MS,
+          );
+          t.unref?.();
+        }),
+      ]);
     } catch {
-      // agenttrace not installed in this host tree
+      // agenttrace not installed, timed out, or dispatch failed
     }
   })();
 }

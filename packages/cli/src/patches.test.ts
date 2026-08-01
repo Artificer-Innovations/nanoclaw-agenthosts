@@ -294,6 +294,66 @@ describe("patchContainerRunner", () => {
     );
     expect(() => patchContainerRunner(broken)).toThrow(/Unbalanced braces/);
   });
+
+  it("widens legacy session-only wakeContainerDocker / spawnContainer on upgrade", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    const wakeType = "ctx?: import('./agenthosts.js').WakeContext";
+    const legacy = installed
+      .replace(
+        `function wakeContainerDocker(session: Session, ${wakeType}): Promise<boolean> {`,
+        "function wakeContainerDocker(session: Session): Promise<boolean> {",
+      )
+      .replace("spawnContainer(session, ctx)", "spawnContainer(session)")
+      .replace(
+        new RegExp(
+          `${BEGIN("docker-spawn-sig")}[\\s\\S]*?${END("docker-spawn-sig")}\\r?\\n?`,
+        ),
+        "",
+      )
+      .replace(
+        `async function spawnContainer(session: Session, ${wakeType}): Promise<void> {`,
+        "async function spawnContainer(session: Session): Promise<void> {",
+      );
+    expect(legacy).toContain(
+      "function wakeContainerDocker(session: Session): Promise<boolean> {",
+    );
+    expect(legacy).toContain(
+      "async function spawnContainer(session: Session): Promise<void> {",
+    );
+    const upgraded = patchContainerRunner(legacy);
+    expect(upgraded).toContain(
+      `function wakeContainerDocker(session: Session, ${wakeType}): Promise<boolean> {`,
+    );
+    expect(upgraded).toContain("spawnContainer(session, ctx)");
+    expect(upgraded).toContain(
+      `async function spawnContainer(session: Session, ${wakeType}): Promise<void> {`,
+    );
+    expect(upgraded).toContain("docker-spawn-sig");
+  });
+
+  it("status patches no-op when spawnContainer signature is absent", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Rename so applyDockerRuntimeStatusPatches early-returns (no phase anchors).
+    const withoutSpawn = installed.replace(
+      /async function spawnContainer\(session: Session[^)]*\)[^{]*\{/,
+      "async function spawnContainerLegacy() {",
+    );
+    expect(withoutSpawn).not.toMatch(
+      /async function spawnContainer\(session: Session/,
+    );
+    expect(() => patchContainerRunner(withoutSpawn)).not.toThrow();
+    expect(patchContainerRunner(withoutSpawn)).toContain("createWakeContext");
+  });
+
+  it("guards userOnStatus throws and emits stopping when session is missing", () => {
+    const patched = patchContainerRunner(fixtureSources.containerRunner);
+    expect(patched).toContain(
+      "Never fail wake because a status callback threw",
+    );
+    expect(patched).toContain(
+      "emitRuntimeStatus({ id: sessionId, agent_group_id: '' }, 'stopping', 'Stopping agent…')",
+    );
+  });
 });
 
 describe("patchIndex", () => {

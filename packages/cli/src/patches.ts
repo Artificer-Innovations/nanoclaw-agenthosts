@@ -317,6 +317,7 @@ function refreshDockerRegister(source: string): string {
   const endMark = end("docker-register");
   const start = source.indexOf(startMark);
   const endIdx = source.indexOf(endMark);
+  /* v8 ignore next 8 — defensive marker bounds + CRLF trailing cut */
   if (start < 0 || endIdx < 0 || endIdx < start) return source;
   const afterEnd = endIdx + endMark.length;
   const trailingNewline =
@@ -514,7 +515,11 @@ export async function wakeContainer(session: Session): Promise<boolean> {
   ctx.onStatus = (phase, summary, extra) => {
     driverReported = true;
     if (phase === 'ready' || phase === 'failed') driverTerminal = true;
-    userOnStatus?.(phase, summary, extra);
+    try {
+      userOnStatus?.(phase, summary, extra);
+    } catch {
+      // Never fail wake because a status callback threw.
+    }
   };
   const coarseTimer = setTimeout(() => {
     // Phase-rich drivers (docker/fly) already emit preparing+; skip the coarse bookend.
@@ -567,6 +572,8 @@ export async function wakeContainer(session: Session): Promise<boolean> {
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
   const session = getSession(sessionId);
   if (!session) {
+    // Session row already gone — still emit stopping for status coverage.
+    emitRuntimeStatus({ id: sessionId, agent_group_id: '' }, 'stopping', 'Stopping agent…');
     killContainerDocker(sessionId, reason, onExit);
     return;
   }

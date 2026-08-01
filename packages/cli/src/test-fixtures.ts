@@ -66,6 +66,13 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const container = spawn(CONTAINER_RUNTIME_BIN_LOCAL, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   activeContainers.set(session.id, { process: container, containerName });
+  // Fixture mirrors the real docker driver's exit cleanup so tests don't leak map entries.
+  container.on('error', () => {
+    activeContainers.delete(session.id);
+  });
+  container.on('exit', () => {
+    activeContainers.delete(session.id);
+  });
   markContainerRunning(session.id);
 }
 

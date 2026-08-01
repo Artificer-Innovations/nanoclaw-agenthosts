@@ -327,6 +327,24 @@ describe("emitRuntimeStatus", () => {
       expect(publishRuntimeActivity).toHaveBeenCalled();
     });
   });
+
+  it("times out a hung publishRuntimeActivity without throwing", async () => {
+    vi.useFakeTimers();
+    try {
+      setRuntimeActivityImporterForTests(async () => ({
+        publishRuntimeActivity: () => new Promise(() => {}),
+      }));
+      const pending = emitRuntimeStatus(
+        activitySession,
+        "preparing",
+        "Starting…",
+      );
+      await vi.advanceTimersByTimeAsync(2_100);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("warnOnce", () => {
