@@ -85,20 +85,29 @@ export function emitRuntimeStatus(
     try {
       const mod = await loadRuntimeActivityModule();
       if (typeof mod.publishRuntimeActivity !== "function") return;
-      await Promise.race([
-        mod.publishRuntimeActivity(session, {
-          phase,
-          summary,
-          state: extra?.state,
-        }),
-        new Promise<never>((_, reject) => {
-          const t = setTimeout(
-            () => reject(new Error("runtime status publish timed out")),
-            RUNTIME_STATUS_TIMEOUT_MS,
-          );
-          t.unref?.();
-        }),
-      ]);
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          mod
+            .publishRuntimeActivity(session, {
+              phase,
+              summary,
+              state: extra?.state,
+            })
+            .finally(() => {
+              if (timeoutId !== undefined) clearTimeout(timeoutId);
+            }),
+          new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+              () => reject(new Error("runtime status publish timed out")),
+              RUNTIME_STATUS_TIMEOUT_MS,
+            );
+            timeoutId.unref?.();
+          }),
+        ]);
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      }
     } catch {
       // agenttrace not installed, timed out, or dispatch failed
     }
