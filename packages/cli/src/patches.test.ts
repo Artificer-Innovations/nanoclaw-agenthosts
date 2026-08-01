@@ -36,7 +36,9 @@ describe("patchContainerRunner", () => {
     expect(once).toContain("wake: (session, ctx) => wakeContainerDocker");
     expect(once).toContain("spawnContainer(session, ctx)");
     expect(once).toContain("docker-status-starting");
-    expect(once).toContain("ctx?.onStatus?.('starting', 'Starting container…')");
+    expect(once).toContain(
+      "ctx?.onStatus?.('starting', 'Starting container…')",
+    );
     expect(once).toContain("ctx?.onStatus?.('ready', 'Agent runtime ready…')");
     expect(patchContainerRunner(once)).toBe(once);
   });

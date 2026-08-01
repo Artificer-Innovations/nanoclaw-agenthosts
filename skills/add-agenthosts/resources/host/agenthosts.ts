@@ -46,10 +46,10 @@ export function emitRuntimeStatus(
 ): void {
   void (async () => {
     try {
-      // Dynamic path — agenttrace-lifecycle.js only exists after agenttrace install.
-      const load = new Function(
-        "return import('./agenttrace-lifecycle.js')",
-      ) as () => Promise<{
+      // Non-literal import — agenttrace-lifecycle.js only exists after agenttrace
+      // install into a NanoClaw host; keep this optional without string codegen.
+      const modulePath = "./agenttrace-lifecycle.js";
+      const mod = (await import(modulePath)) as {
         publishRuntimeActivity?: (
           session: RuntimeActivitySession,
           input: {
@@ -58,8 +58,7 @@ export function emitRuntimeStatus(
             state?: "started" | "progress" | "succeeded" | "failed";
           },
         ) => Promise<void>;
-      }>;
-      const mod = await load();
+      };
       if (typeof mod.publishRuntimeActivity !== "function") return;
       await mod.publishRuntimeActivity(session, {
         phase,

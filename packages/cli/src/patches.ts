@@ -119,8 +119,7 @@ const CONTAINER_IMPORT_SYMBOLS = [
   "COARSE_WAKE_STATUS_MS",
 ] as const;
 
-const WAKE_CONTEXT_TYPE =
-  "ctx?: import('./agenthosts.js').WakeContext";
+const WAKE_CONTEXT_TYPE = "ctx?: import('./agenthosts.js').WakeContext";
 
 /**
  * Widen `./agenthosts.js` import to the current symbol set on upgrade.
@@ -510,12 +509,16 @@ export async function wakeContainer(session: Session): Promise<boolean> {
   const ctx = createWakeContext(session);
   let coarseEmitted = false;
   let driverTerminal = false;
+  let driverReported = false;
   const userOnStatus = ctx.onStatus;
   ctx.onStatus = (phase, summary, extra) => {
+    driverReported = true;
     if (phase === 'ready' || phase === 'failed') driverTerminal = true;
     userOnStatus?.(phase, summary, extra);
   };
   const coarseTimer = setTimeout(() => {
+    // Phase-rich drivers (docker/fly) already emit preparing+; skip the coarse bookend.
+    if (driverReported) return;
     coarseEmitted = true;
     ctx.onStatus?.('preparing', 'Starting agent…');
   }, COARSE_WAKE_STATUS_MS);
