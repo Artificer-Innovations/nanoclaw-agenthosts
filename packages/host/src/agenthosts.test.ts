@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  RUNTIME_STATUS_TIMEOUT_MS,
   createWakeContext,
   emitRuntimeStatus,
   getAgenthostsCapabilities,
@@ -342,6 +343,39 @@ describe("emitRuntimeStatus", () => {
       await vi.advanceTimersByTimeAsync(2_100);
       await expect(pending).resolves.toBeUndefined();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the publish timeout when publish settles first", async () => {
+    vi.useFakeTimers();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let resolvePublish!: () => void;
+      setRuntimeActivityImporterForTests(async () => ({
+        publishRuntimeActivity: () =>
+          new Promise<void>((resolve) => {
+            resolvePublish = resolve;
+          }),
+      }));
+      const pending = emitRuntimeStatus(
+        activitySession,
+        "preparing",
+        "Starting…",
+      );
+      await vi.waitFor(() => {
+        expect(typeof resolvePublish).toBe("function");
+      });
+      resolvePublish();
+      await expect(pending).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(RUNTIME_STATUS_TIMEOUT_MS + 100);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
       vi.useRealTimers();
     }
   });
