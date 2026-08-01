@@ -32,6 +32,16 @@ Optional: `cleanupOrphans`, `buildImage`, `requiredTransport`
 
 `runRuntimeOrphanCleanup()` awaits every registered `cleanupOrphans` (errors warnOnce, continue).
 
+## Runtime status (`WakeContext.onStatus`)
+
+Public `wakeContainer` builds a `WakeContext` via `createWakeContext(session)` and passes it to `driver.wake(session, ctx)`.
+
+- `ctx.onStatus?.(phase, summary)` — drivers emit vendor-neutral lifecycle phases (`preparing`, `configuring`, `starting`, `ready`, `failed`, …)
+- `emitRuntimeStatus` optionally dynamic-imports agenttrace `publishRuntimeActivity` (no hard dependency)
+- Coarse bookends: after `COARSE_WAKE_STATUS_MS` (250ms) emit `preparing`; on slow success emit `ready` unless the driver already reported `ready`/`failed`; always emit `failed` on false/throw when the driver did not
+- `killContainer` emits `stopping`
+- Docker builtin: installer threads `ctx` into `spawnContainer` and inserts `onStatus` at configuring / starting / ready
+
 ## Installer contract
 
 - Marker blocks: `// @nanoclaw-agenthosts:<name>:begin|end`

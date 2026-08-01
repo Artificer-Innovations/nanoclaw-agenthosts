@@ -114,7 +114,13 @@ const CONTAINER_IMPORT_SYMBOLS = [
   "resolveRuntimeName",
   "setContainerConfigReader",
   "setSessionTransportResolver",
+  "createWakeContext",
+  "emitRuntimeStatus",
+  "COARSE_WAKE_STATUS_MS",
 ] as const;
+
+const WAKE_CONTEXT_TYPE =
+  "ctx?: import('./agenthosts.js').WakeContext";
 
 /**
  * Widen `./agenthosts.js` import to the current symbol set on upgrade.
@@ -185,7 +191,10 @@ export function patchContainerRunner(source: string): string {
       "create-require-import",
       { afterMarker: "sessions-import" },
     );
-    return refreshPublicExports(content);
+    content = refreshDockerRegister(content);
+    content = refreshPublicExports(content);
+    content = applyDockerRuntimeStatusPatches(content);
+    return content;
   }
 
   if (coreNames.some((name) => source.includes(begin(name)))) {
@@ -242,7 +251,7 @@ export function patchContainerRunner(source: string): string {
   content = replaceOnce(
     content,
     "export function wakeContainer(session: Session): Promise<boolean> {",
-    `${marked("wake-rename", "// wakeContainer → wakeContainerDocker")}\nfunction wakeContainerDocker(session: Session): Promise<boolean> {`,
+    `${marked("wake-rename", "// wakeContainer → wakeContainerDocker")}\nfunction wakeContainerDocker(session: Session, ${WAKE_CONTEXT_TYPE}): Promise<boolean> {`,
     "wakeContainer export",
   );
 
@@ -257,9 +266,24 @@ export function patchContainerRunner(source: string): string {
     "function killContainerDocker(sessionId: string, reason: string, onExit?: () => void): void {";
   const insertAt = endOfFunction(content, killSig);
 
-  const registerBlock = marked(
-    "docker-register",
-    `setContainerConfigReader((agentGroupId) => {
+  const registerBlock = marked("docker-register", dockerRegisterBody());
+
+  const exportsBlock = marked("public-exports", publicExportsBody());
+
+  content =
+    content.slice(0, insertAt) +
+    "\n\n" +
+    registerBlock +
+    "\n\n" +
+    exportsBlock +
+    "\n" +
+    content.slice(insertAt);
+
+  return applyDockerRuntimeStatusPatches(content);
+}
+
+function dockerRegisterBody(): string {
+  return `setContainerConfigReader((agentGroupId) => {
   const row = getContainerConfig(agentGroupId);
   if (!row) return undefined;
   return {
@@ -282,23 +306,149 @@ try {
 }
 
 registerRuntimeDriver('docker', {
-  wake: (session) => wakeContainerDocker(session as Session),
+  wake: (session, ctx) => wakeContainerDocker(session as Session, ctx),
   kill: killContainerDocker,
   isRunning: isContainerRunningDocker,
   cleanupOrphans,
-});`,
-  );
+});`;
+}
 
-  const exportsBlock = marked("public-exports", publicExportsBody());
-
-  content =
-    content.slice(0, insertAt) +
-    "\n\n" +
-    registerBlock +
-    "\n\n" +
-    exportsBlock +
+function refreshDockerRegister(source: string): string {
+  const startMark = begin("docker-register");
+  const endMark = end("docker-register");
+  const start = source.indexOf(startMark);
+  const endIdx = source.indexOf(endMark);
+  if (start < 0 || endIdx < 0 || endIdx < start) return source;
+  const afterEnd = endIdx + endMark.length;
+  const trailingNewline =
+    source[afterEnd] === "\r" || source[afterEnd] === "\n" ? 1 : 0;
+  const trailingCr =
+    source[afterEnd] === "\r" && source[afterEnd + 1] === "\n" ? 1 : 0;
+  const cut = afterEnd + trailingNewline + trailingCr;
+  return (
+    source.slice(0, start) +
+    marked("docker-register", dockerRegisterBody()) +
     "\n" +
-    content.slice(insertAt);
+    source.slice(cut)
+  );
+}
+
+/**
+ * Thread WakeContext into docker wake/spawn and insert onStatus phase markers.
+ * Idempotent; no-ops when spawnContainer anchors are absent (minimal fixtures).
+ */
+function applyDockerRuntimeStatusPatches(source: string): string {
+  let content = source;
+
+  // Widen wakeContainerDocker signature if an older install still uses session-only.
+  if (
+    content.includes(
+      "function wakeContainerDocker(session: Session): Promise<boolean> {",
+    )
+  ) {
+    content = content.replace(
+      "function wakeContainerDocker(session: Session): Promise<boolean> {",
+      `function wakeContainerDocker(session: Session, ${WAKE_CONTEXT_TYPE}): Promise<boolean> {`,
+    );
+  }
+
+  // Pass ctx into spawnContainer from wakeContainerDocker when the cold-path call exists.
+  if (
+    content.includes("spawnContainer(session)") &&
+    !content.includes("spawnContainer(session, ctx)") &&
+    content.includes("function wakeContainerDocker(session: Session,")
+  ) {
+    content = replaceOnce(
+      content,
+      "spawnContainer(session)",
+      "spawnContainer(session, ctx)",
+      "wake→spawnContainer ctx",
+    );
+  }
+
+  // Widen spawnContainer signature (comment-only marker, like wake-rename).
+  if (
+    content.includes(
+      "async function spawnContainer(session: Session): Promise<void> {",
+    )
+  ) {
+    content = replaceOnce(
+      content,
+      "async function spawnContainer(session: Session): Promise<void> {",
+      `${marked("docker-spawn-sig", "// spawnContainer(+WakeContext)")}\nasync function spawnContainer(session: Session, ${WAKE_CONTEXT_TYPE}): Promise<void> {`,
+      "spawnContainer signature",
+    );
+  }
+
+  if (!content.includes("async function spawnContainer(session: Session")) {
+    return content;
+  }
+
+  // Phase: preparing — after agent-group resolve / at top of cold spawn.
+  if (!content.includes(begin("docker-status-preparing"))) {
+    const agentGroupFail =
+      "    log.error('Agent group not found', { agentGroupId: session.agent_group_id });\n    return;\n  }";
+    if (content.includes(agentGroupFail)) {
+      content = replaceOnce(
+        content,
+        agentGroupFail,
+        `${agentGroupFail}\n\n${marked(
+          "docker-status-preparing",
+          "  ctx?.onStatus?.('preparing', 'Starting agent…');",
+        )}`,
+        "docker preparing status",
+      );
+    }
+  }
+
+  // Phase: configuring — before buildContainerArgs (OneCLI inside).
+  if (!content.includes(begin("docker-status-configuring"))) {
+    const buildArgsCall = "  const args = await buildContainerArgs(";
+    if (content.includes(buildArgsCall)) {
+      content = replaceOnce(
+        content,
+        buildArgsCall,
+        `${marked(
+          "docker-status-configuring",
+          "  ctx?.onStatus?.('configuring', 'Preparing credentials…');",
+        )}\n${buildArgsCall}`,
+        "docker configuring status",
+      );
+    }
+  }
+
+  // Phase: starting — at Spawning container log.
+  if (!content.includes(begin("docker-status-starting"))) {
+    const spawnLog =
+      "  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });";
+    if (content.includes(spawnLog)) {
+      content = replaceOnce(
+        content,
+        spawnLog,
+        `${marked(
+          "docker-status-starting",
+          "  ctx?.onStatus?.('starting', 'Starting container…');",
+        )}\n${spawnLog}`,
+        "docker starting status",
+      );
+    }
+  }
+
+  // Phase: ready — after markContainerRunning.
+  if (!content.includes(begin("docker-status-ready"))) {
+    const markRunning = "  markContainerRunning(session.id);";
+    if (content.includes(markRunning)) {
+      content = replaceOnce(
+        content,
+        markRunning,
+        `${markRunning}\n${marked(
+          "docker-status-ready",
+          "  ctx?.onStatus?.('ready', 'Agent runtime ready…');",
+        )}`,
+        "docker ready status",
+      );
+    }
+  }
 
   return content;
 }
@@ -357,6 +507,19 @@ function publicExportsBody(
 
 export async function wakeContainer(session: Session): Promise<boolean> {
   const runtime = resolveRuntimeName(session);
+  const ctx = createWakeContext(session);
+  let coarseEmitted = false;
+  let driverTerminal = false;
+  const userOnStatus = ctx.onStatus;
+  ctx.onStatus = (phase, summary, extra) => {
+    if (phase === 'ready' || phase === 'failed') driverTerminal = true;
+    userOnStatus?.(phase, summary, extra);
+  };
+  const coarseTimer = setTimeout(() => {
+    coarseEmitted = true;
+    ctx.onStatus?.('preparing', 'Starting agent…');
+  }, COARSE_WAKE_STATUS_MS);
+  coarseTimer.unref?.();
   try {
     // Project destinations/routing before ANY runtime wake (docker, process, …).
     // spawnContainer (docker) already does the same projection; calling it here too
@@ -375,8 +538,21 @@ export async function wakeContainer(session: Session): Promise<boolean> {
     }
     writeSessionRouting(session.agent_group_id, session.id);
     // @nanoclaw-sessionio:wake-prepare-meta-slot
-    return await resolveRuntimeDriver(session).wake(session, {});
+    const ok = await resolveRuntimeDriver(session).wake(session, ctx);
+    clearTimeout(coarseTimer);
+    if (!driverTerminal) {
+      if (!ok) {
+        ctx.onStatus?.('failed', "Couldn't start agent runtime", { state: 'failed' });
+      } else if (coarseEmitted) {
+        ctx.onStatus?.('ready', 'Agent runtime ready…', { state: 'succeeded' });
+      }
+    }
+    return ok;
   } catch (err) {
+    clearTimeout(coarseTimer);
+    if (!driverTerminal) {
+      ctx.onStatus?.('failed', "Couldn't start agent runtime", { state: 'failed' });
+    }
     if (runtime === 'docker') {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
       return false;
@@ -391,6 +567,7 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
     killContainerDocker(sessionId, reason, onExit);
     return;
   }
+  emitRuntimeStatus(session, 'stopping', 'Stopping agent…');
   const runtime = resolveRuntimeName(session);
   try {
     resolveRuntimeDriver(session).kill(sessionId, reason, onExit);
@@ -439,6 +616,11 @@ function refreshPublicExports(source: string): string {
 export function unpatchContainerRunner(source: string): string {
   let content = source;
   for (const name of [
+    "docker-status-ready",
+    "docker-status-starting",
+    "docker-status-configuring",
+    "docker-status-preparing",
+    "docker-spawn-sig",
     "public-exports",
     "docker-register",
     "kill-rename",
@@ -456,8 +638,22 @@ export function unpatchContainerRunner(source: string): string {
     "export function isContainerRunning(sessionId: string): boolean {",
   );
   content = content.replace(
-    "function wakeContainerDocker(session: Session): Promise<boolean> {",
+    new RegExp(
+      `function wakeContainerDocker\\(session: Session(?:, ${escapeRegExp(WAKE_CONTEXT_TYPE)})?\\): Promise<boolean> \\{`,
+    ),
     "export function wakeContainer(session: Session): Promise<boolean> {",
+  );
+  // Restore spawnContainer signature if docker-spawn-sig removal left a widened form,
+  // or if widen happened without the marker wrapping the whole signature line.
+  content = content.replace(
+    new RegExp(
+      `async function spawnContainer\\(session: Session, ${escapeRegExp(WAKE_CONTEXT_TYPE)}\\): Promise<void> \\{`,
+    ),
+    "async function spawnContainer(session: Session): Promise<void> {",
+  );
+  content = content.replace(
+    "spawnContainer(session, ctx)",
+    "spawnContainer(session)",
   );
   content = content.replace(
     "function killContainerDocker(sessionId: string, reason: string, onExit?: () => void): void {",

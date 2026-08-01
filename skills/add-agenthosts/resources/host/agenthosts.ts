@@ -9,9 +9,78 @@ export interface SessionRef {
   agent_group_id: string;
 }
 
+/** Optional host/runtime status callback (agenttrace `publishRuntimeActivity`). */
+export type RuntimeStatusFn = (
+  phase: string,
+  summary: string,
+  extra?: { state?: "started" | "progress" | "succeeded" | "failed" },
+) => void;
+
 export interface WakeContext {
+  /** Emit vendor-neutral runtime lifecycle status (preparing, starting, …). */
+  onStatus?: RuntimeStatusFn;
   /** Extensible bag for OneCLI / driver-specific wake helpers. */
   [key: string]: unknown;
+}
+
+/** Session fields needed to route runtime status to a messaging channel. */
+export interface RuntimeActivitySession {
+  id: string;
+  agent_group_id: string;
+  messaging_group_id?: string | null;
+  thread_id?: string | null;
+}
+
+/** Delay before coarse wake bookends emit — warm already-running hits stay quiet. */
+export const COARSE_WAKE_STATUS_MS = 250;
+
+/**
+ * Fire-and-forget runtime status via optional agenttrace.
+ * No-ops when agenttrace is not installed or disabled.
+ */
+export function emitRuntimeStatus(
+  session: RuntimeActivitySession,
+  phase: string,
+  summary: string,
+  extra?: { state?: "started" | "progress" | "succeeded" | "failed" },
+): void {
+  void (async () => {
+    try {
+      // Dynamic path — agenttrace-lifecycle.js only exists after agenttrace install.
+      const load = new Function(
+        "return import('./agenttrace-lifecycle.js')",
+      ) as () => Promise<{
+        publishRuntimeActivity?: (
+          session: RuntimeActivitySession,
+          input: {
+            phase: string;
+            summary: string;
+            state?: "started" | "progress" | "succeeded" | "failed";
+          },
+        ) => Promise<void>;
+      }>;
+      const mod = await load();
+      if (typeof mod.publishRuntimeActivity !== "function") return;
+      await mod.publishRuntimeActivity(session, {
+        phase,
+        summary,
+        state: extra?.state,
+      });
+    } catch {
+      // agenttrace not installed in this host tree
+    }
+  })();
+}
+
+/** Build a WakeContext whose onStatus forwards to emitRuntimeStatus. */
+export function createWakeContext(
+  session: RuntimeActivitySession,
+): WakeContext {
+  return {
+    onStatus(phase, summary, extra) {
+      emitRuntimeStatus(session, phase, summary, extra);
+    },
+  };
 }
 
 export interface BuildOpts {
@@ -162,7 +231,12 @@ export async function runRuntimeOrphanCleanup(): Promise<void> {
 
 export function getAgenthostsCapabilities(): {
   apiVersion: typeof AGENTHOSTS_API_VERSION;
-  features: { runtimeDrivers: true; orphanCleanup: true; transportGuard: true };
+  features: {
+    runtimeDrivers: true;
+    orphanCleanup: true;
+    transportGuard: true;
+    runtimeStatus: true;
+  };
   counts: { drivers: number };
   runtimes: string[];
 } {
@@ -172,6 +246,7 @@ export function getAgenthostsCapabilities(): {
       runtimeDrivers: true,
       orphanCleanup: true,
       transportGuard: true,
+      runtimeStatus: true,
     },
     counts: { drivers: drivers.size },
     runtimes: listRegisteredRuntimes(),

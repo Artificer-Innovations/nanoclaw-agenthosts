@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Minor Changes
+
+- Add `WakeContext.onStatus`, `createWakeContext` / `emitRuntimeStatus`, and coarse wake/kill bookends that optionally publish agenttrace `runtime_status`.
+- Forward `WakeContext` into the docker driver; thread ctx through `spawnContainer` with phase-rich `onStatus` inserts (configuring / starting / ready).
+
 ## 0.1.1
 
 ### Patch Changes

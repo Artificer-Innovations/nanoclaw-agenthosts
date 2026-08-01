@@ -32,6 +32,12 @@ describe("patchContainerRunner", () => {
     expect(once).toContain("getSession");
     expect(once).toContain("setSessionTransportResolver");
     expect(once).toContain("createRequire");
+    expect(once).toContain("createWakeContext");
+    expect(once).toContain("wake: (session, ctx) => wakeContainerDocker");
+    expect(once).toContain("spawnContainer(session, ctx)");
+    expect(once).toContain("docker-status-starting");
+    expect(once).toContain("ctx?.onStatus?.('starting', 'Starting container…')");
+    expect(once).toContain("ctx?.onStatus?.('ready', 'Agent runtime ready…')");
     expect(patchContainerRunner(once)).toBe(once);
   });
 
@@ -66,7 +72,7 @@ describe("patchContainerRunner", () => {
     );
     const upgraded = patchContainerRunner(withExtra);
     expect(upgraded).toMatch(
-      /import\s*\{\s*registerRuntimeDriver\s*,\s*resolveRuntimeDriver\s*,\s*resolveRuntimeName\s*,\s*setContainerConfigReader\s*,\s*setSessionTransportResolver\s*,\s*someFutureHelper\s*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
+      /import\s*\{\s*registerRuntimeDriver\s*,\s*resolveRuntimeDriver\s*,\s*resolveRuntimeName\s*,\s*setContainerConfigReader\s*,\s*setSessionTransportResolver\s*,\s*createWakeContext\s*,\s*emitRuntimeStatus\s*,\s*COARSE_WAKE_STATUS_MS\s*,\s*someFutureHelper\s*\}\s*from\s*['"]\.\/agenthosts\.js['"]/,
     );
   });
 
@@ -193,7 +199,7 @@ describe("patchContainerRunner", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     expect(patched).toContain("if (runtime === 'docker')");
     expect(patched).toContain(
-      "return await resolveRuntimeDriver(session).wake",
+      "const ok = await resolveRuntimeDriver(session).wake(session, ctx)",
     );
     expect(patched).not.toContain(
       "return resolveRuntimeDriver(session).wake(session, {});",

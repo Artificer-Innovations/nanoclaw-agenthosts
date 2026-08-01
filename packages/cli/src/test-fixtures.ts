@@ -13,9 +13,11 @@ import { getContainerConfig } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { log } from './log.js';
 import { writeSessionRouting } from './session-manager.js';
+import { markContainerRunning } from './session-manager.js';
 import type { Session } from './types.js';
 
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+const CONTAINER_RUNTIME_BIN_LOCAL = CONTAINER_RUNTIME_BIN;
 
 export function getActiveContainerCount(): number {
   return activeContainers.size;
@@ -29,7 +31,55 @@ export function wakeContainer(session: Session): Promise<boolean> {
   if (activeContainers.has(session.id)) {
     return Promise.resolve(true);
   }
-  return Promise.resolve(true);
+  const promise = spawnContainer(session)
+    .then(() => true)
+    .catch(() => false);
+  return promise;
+}
+
+async function spawnContainer(session: Session): Promise<void> {
+  const agentGroup = { id: session.agent_group_id, name: 'fixture', folder: 'fixture' };
+  if (!agentGroup) {
+    log.error('Agent group not found', { agentGroupId: session.agent_group_id });
+    return;
+  }
+
+  if (hasTable(getDb(), 'agent_destinations')) {
+    const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
+    writeDestinations(agentGroup.id, session.id);
+  }
+  writeSessionRouting(agentGroup.id, session.id);
+
+  const containerName = \`nanoclaw-v2-\${agentGroup.folder}-\${Date.now()}\`;
+  const args = await buildContainerArgs(
+    [],
+    containerName,
+    agentGroup,
+    {},
+    null,
+    null,
+    agentGroup.id,
+    undefined,
+  );
+
+  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
+
+  const container = spawn(CONTAINER_RUNTIME_BIN_LOCAL, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  activeContainers.set(session.id, { process: container, containerName });
+  markContainerRunning(session.id);
+}
+
+async function buildContainerArgs(
+  _mounts: unknown[],
+  _containerName: string,
+  _agentGroup: unknown,
+  _containerConfig: unknown,
+  _provider: unknown,
+  _contribution: unknown,
+  _agentIdentifier?: string,
+  _parentIdentifier?: string,
+): Promise<string[]> {
+  return ['run', 'alpine'];
 }
 
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {

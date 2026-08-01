@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createWakeContext,
   getAgenthostsCapabilities,
   listRegisteredRuntimes,
   probeAgenthostsCapabilities,
@@ -224,6 +225,23 @@ describe("runRuntimeOrphanCleanup", () => {
     registerRuntimeDriver("good", good);
     await runRuntimeOrphanCleanup();
     expect(good.cleanupOrphans).toHaveBeenCalledOnce();
+  });
+});
+
+describe("createWakeContext / emitRuntimeStatus", () => {
+  it("createWakeContext onStatus does not throw without agenttrace", () => {
+    const ctx = createWakeContext({
+      id: "s1",
+      agent_group_id: "ag-1",
+      messaging_group_id: "mg-1",
+      thread_id: "main",
+    });
+    expect(() => ctx.onStatus?.("preparing", "Starting agent…")).not.toThrow();
+  });
+
+  it("reports runtimeStatus capability", () => {
+    const caps = getAgenthostsCapabilities();
+    expect(caps.features.runtimeStatus).toBe(true);
   });
 });
 
