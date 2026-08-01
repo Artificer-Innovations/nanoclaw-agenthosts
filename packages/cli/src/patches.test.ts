@@ -345,13 +345,15 @@ describe("patchContainerRunner", () => {
     expect(patchContainerRunner(withoutSpawn)).toContain("createWakeContext");
   });
 
-  it("guards userOnStatus throws and emits stopping when session is missing", () => {
+  it("guards userOnStatus throws; missing-session kill skips status emit", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     expect(patched).toContain(
       "Never fail wake because a status callback threw",
     );
-    expect(patched).toContain(
-      "emitRuntimeStatus({ id: sessionId, agent_group_id: '' }, 'stopping', 'Stopping agent…')",
+    // No stub session — publishRuntimeActivity needs messaging_group_id.
+    expect(patched).toContain("cannot emit stopping: agenttrace");
+    expect(patched).not.toContain(
+      "emitRuntimeStatus({ id: sessionId, agent_group_id: '' }",
     );
   });
 });

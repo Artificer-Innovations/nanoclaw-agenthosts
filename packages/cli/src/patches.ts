@@ -572,8 +572,8 @@ export async function wakeContainer(session: Session): Promise<boolean> {
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
   const session = getSession(sessionId);
   if (!session) {
-    // Session row already gone — still emit stopping for status coverage.
-    emitRuntimeStatus({ id: sessionId, agent_group_id: '' }, 'stopping', 'Stopping agent…');
+    // Session row already gone — cannot emit stopping: agenttrace
+    // publishRuntimeActivity requires messaging_group_id to dispatch.
     killContainerDocker(sessionId, reason, onExit);
     return;
   }
