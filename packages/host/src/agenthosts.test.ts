@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  RUNTIME_STATUS_TIMEOUT_MS,
+  createWakeContext,
+  emitRuntimeStatus,
   getAgenthostsCapabilities,
   listRegisteredRuntimes,
   probeAgenthostsCapabilities,
@@ -10,6 +13,7 @@ import {
   resolveSessionTransportName,
   runRuntimeOrphanCleanup,
   setContainerConfigReader,
+  setRuntimeActivityImporterForTests,
   setSessionTransportResolver,
   type RuntimeDriver,
   type SessionRef,
@@ -227,6 +231,23 @@ describe("runRuntimeOrphanCleanup", () => {
   });
 });
 
+describe("createWakeContext / emitRuntimeStatus", () => {
+  it("createWakeContext onStatus does not throw without agenttrace", () => {
+    const ctx = createWakeContext({
+      id: "s1",
+      agent_group_id: "ag-1",
+      messaging_group_id: "mg-1",
+      thread_id: "main",
+    });
+    expect(() => ctx.onStatus?.("preparing", "Starting agent…")).not.toThrow();
+  });
+
+  it("reports runtimeStatus capability", () => {
+    const caps = getAgenthostsCapabilities();
+    expect(caps.features.runtimeStatus).toBe(true);
+  });
+});
+
 describe("capabilities", () => {
   it("reports registered runtimes", () => {
     registerRuntimeDriver("docker", stubDriver());
@@ -257,6 +278,106 @@ describe("capabilities", () => {
         throw new Error("nope");
       }),
     ).toMatchObject({ present: false, reason: "error" });
+  });
+});
+
+describe("emitRuntimeStatus", () => {
+  const activitySession = {
+    id: "s1",
+    agent_group_id: "ag-1",
+    messaging_group_id: "mg-1",
+  };
+
+  it("forwards to publishRuntimeActivity when the module is available", async () => {
+    const publishRuntimeActivity = vi.fn(async () => undefined);
+    setRuntimeActivityImporterForTests(async () => ({
+      publishRuntimeActivity,
+    }));
+    await emitRuntimeStatus(activitySession, "preparing", "Starting…", {
+      state: "started",
+    });
+    expect(publishRuntimeActivity).toHaveBeenCalledWith(activitySession, {
+      phase: "preparing",
+      summary: "Starting…",
+      state: "started",
+    });
+  });
+
+  it("no-ops when publishRuntimeActivity is missing and when import throws", async () => {
+    setRuntimeActivityImporterForTests(async () => ({}));
+    await expect(
+      emitRuntimeStatus(activitySession, "preparing", "Starting…"),
+    ).resolves.toBeUndefined();
+
+    setRuntimeActivityImporterForTests(async () => {
+      throw new Error("missing");
+    });
+    await expect(
+      emitRuntimeStatus(activitySession, "preparing", "Starting…"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("createWakeContext onStatus forwards through emitRuntimeStatus", async () => {
+    const publishRuntimeActivity = vi.fn(async () => undefined);
+    setRuntimeActivityImporterForTests(async () => ({
+      publishRuntimeActivity,
+    }));
+    const ctx = createWakeContext(activitySession);
+    ctx.onStatus?.("ready", "Agent runtime ready…", { state: "succeeded" });
+    await vi.waitFor(() => {
+      expect(publishRuntimeActivity).toHaveBeenCalled();
+    });
+  });
+
+  it("times out a hung publishRuntimeActivity without throwing", async () => {
+    vi.useFakeTimers();
+    try {
+      setRuntimeActivityImporterForTests(async () => ({
+        publishRuntimeActivity: () => new Promise(() => {}),
+      }));
+      const pending = emitRuntimeStatus(
+        activitySession,
+        "preparing",
+        "Starting…",
+      );
+      await vi.advanceTimersByTimeAsync(2_100);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the publish timeout when publish settles first", async () => {
+    vi.useFakeTimers();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let resolvePublish!: () => void;
+      setRuntimeActivityImporterForTests(async () => ({
+        publishRuntimeActivity: () =>
+          new Promise<void>((resolve) => {
+            resolvePublish = resolve;
+          }),
+      }));
+      const pending = emitRuntimeStatus(
+        activitySession,
+        "preparing",
+        "Starting…",
+      );
+      await vi.waitFor(() => {
+        expect(typeof resolvePublish).toBe("function");
+      });
+      resolvePublish();
+      await expect(pending).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(RUNTIME_STATUS_TIMEOUT_MS + 100);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      vi.useRealTimers();
+    }
   });
 });
 
