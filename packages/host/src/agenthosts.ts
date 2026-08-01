@@ -34,31 +34,49 @@ export interface RuntimeActivitySession {
 /** Delay before coarse wake bookends emit — warm already-running hits stay quiet. */
 export const COARSE_WAKE_STATUS_MS = 250;
 
+type RuntimeActivityModule = {
+  publishRuntimeActivity?: (
+    session: RuntimeActivitySession,
+    input: {
+      phase: string;
+      summary: string;
+      state?: "started" | "progress" | "succeeded" | "failed";
+    },
+  ) => Promise<void>;
+};
+
+let runtimeActivityImporter: (() => Promise<RuntimeActivityModule>) | null =
+  null;
+
+/** Test seam — inject a fake agenttrace lifecycle module. */
+export function setRuntimeActivityImporterForTests(
+  importer: (() => Promise<RuntimeActivityModule>) | null,
+): void {
+  runtimeActivityImporter = importer;
+}
+
+async function loadRuntimeActivityModule(): Promise<RuntimeActivityModule> {
+  if (runtimeActivityImporter) return runtimeActivityImporter();
+  // Non-literal import — agenttrace-lifecycle.js only exists after agenttrace
+  // install into a NanoClaw host; keep this optional without string codegen.
+  const modulePath = "./agenttrace-lifecycle.js";
+  return import(modulePath) as Promise<RuntimeActivityModule>;
+}
+
 /**
  * Fire-and-forget runtime status via optional agenttrace.
  * No-ops when agenttrace is not installed or disabled.
+ * Returns a promise for tests; production callers ignore it.
  */
 export function emitRuntimeStatus(
   session: RuntimeActivitySession,
   phase: string,
   summary: string,
   extra?: { state?: "started" | "progress" | "succeeded" | "failed" },
-): void {
-  void (async () => {
+): Promise<void> {
+  return (async () => {
     try {
-      // Non-literal import — agenttrace-lifecycle.js only exists after agenttrace
-      // install into a NanoClaw host; keep this optional without string codegen.
-      const modulePath = "./agenttrace-lifecycle.js";
-      const mod = (await import(modulePath)) as {
-        publishRuntimeActivity?: (
-          session: RuntimeActivitySession,
-          input: {
-            phase: string;
-            summary: string;
-            state?: "started" | "progress" | "succeeded" | "failed";
-          },
-        ) => Promise<void>;
-      };
+      const mod = await loadRuntimeActivityModule();
       if (typeof mod.publishRuntimeActivity !== "function") return;
       await mod.publishRuntimeActivity(session, {
         phase,
@@ -287,6 +305,7 @@ export function resetAgenthostsForTests(): void {
   drivers.clear();
   containerConfigReader = null;
   sessionTransportResolver = null;
+  runtimeActivityImporter = null;
   delete process.env.NANOCLAW_DEFAULT_RUNTIME;
 }
 
