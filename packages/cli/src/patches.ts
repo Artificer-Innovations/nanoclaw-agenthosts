@@ -331,7 +331,7 @@ function refreshDockerRegister(source: string): string {
   const trailingNewline =
     /* v8 ignore start */
     source[afterEnd] === "\r" || source[afterEnd] === "\n" ? 1 : 0;
-    /* v8 ignore stop */
+  /* v8 ignore stop */
   const trailingCr =
     source[afterEnd] === "\r" && source[afterEnd + 1] === "\n" ? 1 : 0;
   const cut = afterEnd + trailingNewline + trailingCr;
@@ -400,7 +400,7 @@ function applyDockerRuntimeStatusPatches(source: string): string {
       "    log.error('Agent group not found', { agentGroupId: session.agent_group_id });\n    return;\n  }";
     /* v8 ignore start */
     if (content.includes(agentGroupFail)) {
-    /* v8 ignore stop */
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         agentGroupFail,
@@ -418,7 +418,7 @@ function applyDockerRuntimeStatusPatches(source: string): string {
     const buildArgsCall = "  const args = await buildContainerArgs(";
     /* v8 ignore start */
     if (content.includes(buildArgsCall)) {
-    /* v8 ignore stop */
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         buildArgsCall,
@@ -437,7 +437,7 @@ function applyDockerRuntimeStatusPatches(source: string): string {
       "  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });";
     /* v8 ignore start */
     if (content.includes(spawnLog)) {
-    /* v8 ignore stop */
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         spawnLog,
@@ -455,7 +455,7 @@ function applyDockerRuntimeStatusPatches(source: string): string {
     const markRunning = "  markContainerRunning(session.id);";
     /* v8 ignore start */
     if (content.includes(markRunning)) {
-    /* v8 ignore stop */
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         markRunning,
@@ -759,7 +759,7 @@ export function unpatchIndex(source: string): string {
   // symbol — synthesize a fresh import in that case so uninstall is runnable.
   /* v8 ignore start */
   if (content.includes("cleanupOrphans();")) {
-  /* v8 ignore stop */
+    /* v8 ignore stop */
     const importRe = /import \{([^}]+)\} from '\.\/container-runtime\.js';/;
     if (importRe.test(content)) {
       content = content.replace(importRe, (match, symbols: string) => {
@@ -939,7 +939,7 @@ export function patchMigrationsIndex(source: string): string {
   // migration020+ before this package's migration020 is still the next number.
   /* v8 ignore start */
   if (!content.includes(begin("migrations-import"))) {
-  /* v8 ignore stop */
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
       "import { migration019 } from './019-wiring-threads.js';",
@@ -953,7 +953,7 @@ ${end("migrations-import")}`,
 
   /* v8 ignore start */
   if (!content.includes(begin("migrations-register"))) {
-  /* v8 ignore stop */
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
       "  migration019,\n];",
@@ -1310,7 +1310,7 @@ function normalizeDeliveryImports(content: string): string {
   // Unmarked hotfix widened session-manager import — restore stock when heal is gone.
   /* v8 ignore start */
   if (
-  /* v8 ignore stop */
+    /* v8 ignore stop */
     !next.includes(begin("delivery-heal-session-import")) &&
     !next.includes("markContainerRunning(session.id)")
   ) {
@@ -1322,7 +1322,7 @@ function normalizeDeliveryImports(content: string): string {
   // Drop unmarked isContainerRunning import when heal body is gone.
   /* v8 ignore start */
   if (
-  /* v8 ignore stop */
+    /* v8 ignore stop */
     !next.includes(begin("delivery-heal-import")) &&
     !next.includes("isContainerRunning(session.id)")
   ) {
@@ -1395,7 +1395,7 @@ export function patchDelivery(source: string): string {
 
   /* v8 ignore start */
   if (!content.includes(begin("delivery-heal-session-import"))) {
-  /* v8 ignore stop */
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
       STOCK_SESSION_MANAGER_IMPORT,
@@ -1407,7 +1407,7 @@ export function patchDelivery(source: string): string {
   content = scavengeUnmarkedPollActiveHeal(content);
   /* v8 ignore start */
   if (!content.includes(begin("delivery-pollactive-heal"))) {
-  /* v8 ignore stop */
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
       STOCK_POLLACTIVE_BODY,
