@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+### Patch Changes
+
+- Install/verify against NanoClaw 2026.10.1-rc.2 (async DbDriver migration026, docker register without cleanupOrphans, nested hosthooks-safe imports).
+
 ## 0.2.0
 
 ### Minor Changes
