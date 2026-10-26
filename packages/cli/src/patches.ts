@@ -1020,7 +1020,9 @@ export function patchContainerConfigsDb(source: string): string {
       | 'timezone'
       | 'speed'
     >`,
-    marked("db-update-scalars-type", `Pick<
+    marked(
+      "db-update-scalars-type",
+      `Pick<
       ContainerConfigRow,
       | 'provider'
       | 'model'
@@ -1033,7 +1035,8 @@ export function patchContainerConfigsDb(source: string): string {
       | 'speed'
       | 'runtime'
       | 'session_transport'
-    >`),
+    >`,
+    ),
     "updateContainerConfigScalars Pick type",
   );
 
