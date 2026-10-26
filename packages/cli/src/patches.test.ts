@@ -246,6 +246,21 @@ describe("patchContainerRunner", () => {
     expect(patched).toContain("registerRuntimeDriver('docker'");
   });
 
+  it("accepts v2026.10 slim container-runtime import without inventing cleanupOrphans", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain(
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    expect(patched).not.toMatch(
+      /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
+    );
+    expect(patched).toContain("registerRuntimeDriver('docker'");
+  });
+
   it("throws when container-runtime import cannot gain cleanupOrphans", () => {
     const source = fixtureSources.containerRunner.replace(
       "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
@@ -371,6 +386,27 @@ describe("patchIndex", () => {
     expect(restored).toMatch(
       /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
     );
+    expect(restored).not.toContain("@nanoclaw-agenthosts:");
+  });
+
+  it("inserts orphan cleanup after adoptRunningSessions on v2026.10 hosts", () => {
+    const source = `import { adoptRunningSessions } from './container-runner.js';
+
+async function main(): Promise<void> {
+  await adoptRunningSessions();
+  startHostSweep();
+}
+`;
+    const patched = patchIndex(source);
+    expect(patched).toContain("await adoptRunningSessions();");
+    expect(patched).toContain("await runRuntimeOrphanCleanup()");
+    expect(patched.lastIndexOf("await adoptRunningSessions()")).toBeLessThan(
+      patched.indexOf("await runRuntimeOrphanCleanup()"),
+    );
+    const restored = unpatchIndex(patched);
+    expect(restored).toContain("await adoptRunningSessions();");
+    expect(restored).not.toContain("runRuntimeOrphanCleanup");
+    expect(restored).not.toContain("cleanupOrphans();");
     expect(restored).not.toContain("@nanoclaw-agenthosts:");
   });
 
@@ -531,12 +567,12 @@ ${END("types-runtime-fields")}`,
     expect(restored).not.toContain("'runtime'");
   });
 
-  it("registers migration020", () => {
+  it("registers migration026", () => {
     const patched = patchMigrationsIndex(fixtureSources.migrationsIndex);
-    expect(patched).toContain("from './020-agenthosts-runtime.js'");
-    expect(patched).toContain("migration020");
+    expect(patched).toContain("from './026-agenthosts-runtime.js'");
+    expect(patched).toContain("migration026");
     expect(patchMigrationsIndex(patched)).toBe(patched);
-    expect(unpatchMigrationsIndex(patched)).not.toContain("migration020");
+    expect(unpatchMigrationsIndex(patched)).not.toContain("migration026");
   });
 
   it("adds ncl --runtime wiring", () => {

@@ -109,10 +109,19 @@ function endOfFunction(content: string, signature: string): number {
   throw new Error(`Unbalanced braces for ${signature}`);
 }
 
-const STOCK_RUNTIME_IMPORT =
+/** Pre-v2026.10 stock import (helpers lived on container-runtime). */
+const STOCK_RUNTIME_IMPORT_LEGACY =
   "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';";
+/** Legacy import after agenthosts adds cleanupOrphans for orphan dispatch. */
 const PATCHED_RUNTIME_IMPORT =
   "import { CONTAINER_RUNTIME_BIN, cleanupOrphans, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';";
+/**
+ * NanoClaw v2026.10+ slimmed container-runtime to the binary constant only;
+ * orphan cleanup and mount helpers moved into the SessionDriver layer.
+ * Agenthosts must not invent a cleanupOrphans re-export that no longer exists.
+ */
+const STOCK_RUNTIME_IMPORT_V2026 =
+  "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';";
 
 const CONTAINER_IMPORT_SYMBOLS = [
   "registerRuntimeDriver",
@@ -208,21 +217,51 @@ export function patchContainerRunner(source: string): string {
     );
   }
 
-  let content = installImport(
-    source,
-    "./agenthosts.js",
-    [...CONTAINER_IMPORT_SYMBOLS],
-    "container-import",
-  );
+  // Prefer a sibling AFTER hosthooks' container-import block so hosthooks
+  // uninstall cannot swallow agenthosts markers nested inside that region.
+  const hosthooksImportEnd = "// @nanoclaw-hosthooks:container-import:end";
+  let content = source;
+  if (
+    !content.includes(begin("container-import")) &&
+    content.includes(hosthooksImportEnd)
+  ) {
+    const block = `${begin("container-import")}\nimport { ${CONTAINER_IMPORT_SYMBOLS.join(", ")} } from './agenthosts.js';\n${end("container-import")}\n`;
+    const idx = content.indexOf(hosthooksImportEnd);
+    let insertAt = idx + hosthooksImportEnd.length;
+    if (content[insertAt] === "\r") insertAt += 1;
+    if (content[insertAt] === "\n") insertAt += 1;
+    content = content.slice(0, insertAt) + block + content.slice(insertAt);
+  } else {
+    content = installImport(
+      content,
+      "./agenthosts.js",
+      [...CONTAINER_IMPORT_SYMBOLS],
+      "container-import",
+    );
+  }
 
   // Insert as a sibling after container-import:end — never nest inside that block.
-  content = installImport(
-    content,
-    "./db/sessions.js",
-    ["getSession"],
-    "sessions-import",
-    { afterMarker: "container-import" },
-  );
+  // v2026.10+ already imports getSession for SessionDriver composition.
+  // Wrap the existing import with markers instead of declaring a duplicate.
+  if (
+    !content.includes(begin("sessions-import")) &&
+    /import \{[^}]*\bgetSession\b[^}]*\} from '\.\/db\/sessions\.js';/.test(
+      content,
+    )
+  ) {
+    content = content.replace(
+      /import \{([^}]*)\} from '\.\/db\/sessions\.js';/,
+      `${begin("sessions-import")}\nimport { $1 } from './db/sessions.js';\n${end("sessions-import")}`,
+    );
+  } else {
+    content = installImport(
+      content,
+      "./db/sessions.js",
+      ["getSession"],
+      "sessions-import",
+      { afterMarker: "container-import" },
+    );
+  }
 
   content = installImport(
     content,
@@ -232,14 +271,17 @@ export function patchContainerRunner(source: string): string {
     { afterMarker: "sessions-import" },
   );
 
-  if (content.includes(STOCK_RUNTIME_IMPORT)) {
+  if (content.includes(STOCK_RUNTIME_IMPORT_LEGACY)) {
     content = replaceOnce(
       content,
-      STOCK_RUNTIME_IMPORT,
+      STOCK_RUNTIME_IMPORT_LEGACY,
       PATCHED_RUNTIME_IMPORT,
       "cleanupOrphans import",
     );
-  } else if (!content.includes(PATCHED_RUNTIME_IMPORT)) {
+  } else if (
+    !content.includes(PATCHED_RUNTIME_IMPORT) &&
+    !content.includes(STOCK_RUNTIME_IMPORT_V2026)
+  ) {
     throw new Error(
       "Could not find container-runtime import to add cleanupOrphans",
     );
@@ -314,7 +356,7 @@ registerRuntimeDriver('docker', {
   wake: (session, ctx) => wakeContainerDocker(session as Session, ctx),
   kill: killContainerDocker,
   isRunning: isContainerRunningDocker,
-  cleanupOrphans,
+  // v2026.10+: orphan sweep is SessionDriver-owned; no cleanupOrphans export.
 });`;
 }
 
@@ -690,7 +732,10 @@ export function unpatchContainerRunner(source: string): string {
   );
 
   if (content.includes(PATCHED_RUNTIME_IMPORT)) {
-    content = content.replace(PATCHED_RUNTIME_IMPORT, STOCK_RUNTIME_IMPORT);
+    content = content.replace(
+      PATCHED_RUNTIME_IMPORT,
+      STOCK_RUNTIME_IMPORT_LEGACY,
+    );
   }
 
   // Marked-block removal can leave runs of blank lines where rename/export
@@ -711,31 +756,49 @@ export function patchIndex(source: string): string {
     "index-import",
   );
 
-  content = replaceOnce(
-    content,
-    "  cleanupOrphans();",
-    marked("index-orphan-cleanup", "  await runRuntimeOrphanCleanup();"),
-    "index cleanupOrphans call",
-  );
+  if (content.includes("  cleanupOrphans();")) {
+    content = replaceOnce(
+      content,
+      "  cleanupOrphans();",
+      marked("index-orphan-cleanup", "  await runRuntimeOrphanCleanup();"),
+      "index cleanupOrphans call",
+    );
 
-  // Drop unused cleanupOrphans from the stock container-runtime import so hosts
-  // that lint unused imports still build after install.
-  content = content.replace(
-    /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
-    (match, symbols: string) => {
-      const parts = symbols
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const next = parts.filter((s) => s !== "cleanupOrphans");
-      if (next.length === parts.length) return match;
-      if (next.length === 0) {
-        // Only cleanupOrphans was imported — drop the whole statement.
-        return "";
-      }
-      return `import { ${next.join(", ")} } from './container-runtime.js';`;
-    },
-  );
+    // Drop unused cleanupOrphans from the stock container-runtime import so hosts
+    // that lint unused imports still build after install.
+    content = content.replace(
+      /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
+      (match, symbols: string) => {
+        const parts = symbols
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const next = parts.filter((s) => s !== "cleanupOrphans");
+        if (next.length === parts.length) return match;
+        if (next.length === 0) {
+          // Only cleanupOrphans was imported — drop the whole statement.
+          return "";
+        }
+        return `import { ${next.join(", ")} } from './container-runtime.js';`;
+      },
+    );
+  } else if (content.includes("  await adoptRunningSessions();")) {
+    // v2026.10+: stock no longer calls cleanupOrphans(); orphan sweep rides
+    // SessionDriver. Insert agenthosts dispatch immediately after adoption.
+    content = replaceOnce(
+      content,
+      "  await adoptRunningSessions();\n",
+      `  await adoptRunningSessions();\n${marked(
+        "index-orphan-cleanup",
+        "  await runRuntimeOrphanCleanup();",
+      )}\n`,
+      "index adoptRunningSessions orphan cleanup",
+    );
+  } else {
+    throw new Error(
+      "Could not find index orphan-cleanup anchor (cleanupOrphans or adoptRunningSessions)",
+    );
+  }
 
   return content;
 }
@@ -799,9 +862,50 @@ export function patchTypes(source: string): string {
       );
   }
 
+  const stockTail = `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  updated_at: string;
+}`;
+
+  const legacyTail =
+    "  cli_scope: string; // 'disabled' | 'group' | 'global'\n  updated_at: string;\n}";
+
+  const patchedTail = `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
+  runtime?: string | null;
+  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
+  session_transport?: string | null;
+  updated_at: string;
+}`;
+
+  if (source.includes(stockTail)) {
+    return replaceOnce(
+      source,
+      stockTail,
+      marked("types-runtime-fields", patchedTail),
+      "ContainerConfigRow fields",
+    );
+  }
   return replaceOnce(
     source,
-    "  cli_scope: string; // 'disabled' | 'group' | 'global'\n  updated_at: string;\n}",
+    legacyTail,
     marked(
       "types-runtime-fields",
       `  cli_scope: string; // 'disabled' | 'group' | 'global'
@@ -868,6 +972,8 @@ const STOCK_SCALAR_COLUMNS = `const SCALAR_COLUMNS = new Set([
   'assistant_name',
   'max_messages_per_prompt',
   'cli_scope',
+  'timezone',
+  'speed',
 ]);`;
 
 const PATCHED_SCALAR_COLUMNS = `const SCALAR_COLUMNS = new Set([
@@ -878,14 +984,16 @@ const PATCHED_SCALAR_COLUMNS = `const SCALAR_COLUMNS = new Set([
   'assistant_name',
   'max_messages_per_prompt',
   'cli_scope',
+  'timezone',
+  'speed',
   'runtime',
   'session_transport',
 ]);`;
 
 const STOCK_SCALARS_PICK =
-  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'";
+  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope' | 'timezone' | 'speed'";
 const PATCHED_SCALARS_PICK =
-  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope' | 'runtime' | 'session_transport'";
+  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope' | 'timezone' | 'speed' | 'runtime' | 'session_transport'";
 
 export function patchContainerConfigsDb(source: string): string {
   const names = ["db-scalar-columns", "db-update-scalars-type"];
@@ -900,8 +1008,32 @@ export function patchContainerConfigsDb(source: string): string {
 
   content = replaceOnce(
     content,
-    STOCK_SCALARS_PICK,
-    marked("db-update-scalars-type", PATCHED_SCALARS_PICK),
+    `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+    >`,
+    marked("db-update-scalars-type", `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+      | 'runtime'
+      | 'session_transport'
+    >`),
     "updateContainerConfigScalars Pick type",
   );
 
@@ -910,11 +1042,39 @@ export function patchContainerConfigsDb(source: string): string {
 
 export function unpatchContainerConfigsDb(source: string): string {
   let content = source;
+  // Restore the stock Pick<> block (multiline). Matching the short
+  // PATCHED_SCALARS_PICK string fails against the marked Pick<> body.
   if (content.includes(begin("db-update-scalars-type"))) {
+    const stockPick = `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+    >`;
+    const patchedPick = `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+      | 'runtime'
+      | 'session_transport'
+    >`;
     content = replaceOnce(
       content,
-      marked("db-update-scalars-type", PATCHED_SCALARS_PICK),
-      STOCK_SCALARS_PICK,
+      marked("db-update-scalars-type", patchedPick),
+      stockPick,
       "restore scalars pick",
     );
   }
@@ -935,19 +1095,18 @@ export function patchMigrationsIndex(source: string): string {
 
   let content = source;
 
-  // Coupled to upstream tip migration019: bump these anchors when NanoClaw adds
-  // migration020+ before this package's migration020 is still the next number.
+  // Coupled to upstream tip migration025 (v2026.10.1-rc.2). Bump when trunk adds more.
   /* v8 ignore start */
   if (!content.includes(begin("migrations-import"))) {
     /* v8 ignore stop */
     content = replaceOnce(
       content,
-      "import { migration019 } from './019-wiring-threads.js';",
-      `import { migration019 } from './019-wiring-threads.js';
+      "import { migration025 } from './025-container-config-speed.js';",
+      `import { migration025 } from './025-container-config-speed.js';
 ${begin("migrations-import")}
-import { migration020 } from './020-agenthosts-runtime.js';
+import { migration026 } from './026-agenthosts-runtime.js';
 ${end("migrations-import")}`,
-      "migration019 import",
+      "migration025 import",
     );
   }
 
@@ -956,13 +1115,13 @@ ${end("migrations-import")}`,
     /* v8 ignore stop */
     content = replaceOnce(
       content,
-      "  migration019,\n];",
-      `  migration019,
+      "  migration025,\n];",
+      `  migration025,
 ${begin("migrations-register")}
-  migration020,
+  migration026,
 ${end("migrations-register")}
 ];`,
-      "migration019 register",
+      "migration025 register",
     );
   }
 
@@ -996,12 +1155,14 @@ export function patchGroupsCli(source: string): string {
   content = replaceOnce(
     content,
     `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     updated_at: row.updated_at,
   };
 }`,
     marked(
       "groups-present-config",
       `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     runtime: row.runtime,
     session_transport: row.session_transport,
     updated_at: row.updated_at,
@@ -1013,14 +1174,22 @@ export function patchGroupsCli(source: string): string {
 
   content = replaceOnce(
     content,
-    `        initGroupFilesystem(group);
+    `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
     marked(
       "groups-create-runtime",
-      `        initGroupFilesystem(group);
+      `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         if (args.runtime !== undefined || args['session-transport'] !== undefined || args.session_transport !== undefined) {
           const stamped: Partial<Pick<ContainerConfigRow, 'runtime' | 'session_transport'>> = {};
           if (args.runtime !== undefined) {
@@ -1035,10 +1204,16 @@ export function patchGroupsCli(source: string): string {
           }
           const transport = args['session-transport'] ?? args.session_transport;
           if (transport !== undefined) stamped.session_transport = String(transport);
-          updateContainerConfigScalars(id, stamped);
+          await updateContainerConfigScalars(id, stamped);
         }
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
     ),
@@ -1048,19 +1223,50 @@ export function patchGroupsCli(source: string): string {
   content = replaceOnce(
     content,
     `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
     marked(
       "groups-config-update-desc",
       `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
     ),
     "config update description",
   );
 
   content = replaceOnce(
     content,
-    STOCK_SCALARS_PICK,
-    marked("groups-config-update-type", PATCHED_SCALARS_PICK),
+    `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+          >`,
+    marked(
+      "groups-config-update-type",
+      `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+            | 'runtime'
+            | 'session_transport'
+          >`,
+    ),
     "groups config update Pick type",
   );
 
@@ -1076,7 +1282,7 @@ export function patchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }`,
     marked(
@@ -1104,7 +1310,7 @@ export function patchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --runtime, --session-transport',
           );
         }`,
     ),
@@ -1372,6 +1578,17 @@ export function patchDelivery(source: string): string {
     "delivery-heal-session-import",
     "delivery-pollactive-heal",
   ];
+  // v2026.10+: pollActive already drains via deliverToSessions(getRunningSessions()).
+  // Legacy markContainerRunning heal is unnecessary; leave delivery untouched.
+  if (
+    /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/.test(
+      source,
+    ) &&
+    !source.includes("markContainerRunning(session.id)") &&
+    !names.some((name) => source.includes(begin(name)))
+  ) {
+    return source;
+  }
   let content = source;
 
   const present = names.filter((name) => content.includes(begin(name)));
