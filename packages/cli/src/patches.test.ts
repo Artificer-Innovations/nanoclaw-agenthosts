@@ -593,13 +593,13 @@ ${END("types-runtime-fields")}`,
   });
 });
 
-
-
 describe("coverage gaps for 2026.10 anchors", () => {
-
   it("accepts CRLF after hosthooks container-import end marker", () => {
     const base = fixtureSources.containerRunner
-      .replace(/\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\r?\n?/g, "")
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\r?\n?/g,
+        "",
+      )
       .replace(/import \{[^}]*\} from '\.\/agenthosts\.js';\r?\n?/g, "");
     const withCrlf = base.replace(
       "// @nanoclaw-hosthooks:container-import:end\n",
@@ -611,19 +611,23 @@ describe("coverage gaps for 2026.10 anchors", () => {
   });
 
   it("inserts container-import after hosthooks marker on a full runner fixture", () => {
-    const source = fixtureSources.containerRunner.replace(
-      "@nanoclaw-hosthooks:container-import:begin",
-      "REMOVED_BEGIN",
-    ).replace(
-      /\/\/ @nanoclaw-hosthooks:container-import:begin[\s\S]*?\/\/ @nanoclaw-hosthooks:container-import:end\n/,
-      "// @nanoclaw-hosthooks:container-import:end\n",
-    );
+    const source = fixtureSources.containerRunner
+      .replace("@nanoclaw-hosthooks:container-import:begin", "REMOVED_BEGIN")
+      .replace(
+        /\/\/ @nanoclaw-hosthooks:container-import:begin[\s\S]*?\/\/ @nanoclaw-hosthooks:container-import:end\n/,
+        "// @nanoclaw-hosthooks:container-import:end\n",
+      );
     // Ensure hosthooks end marker remains without agenthosts import yet
     const stripped = source
-      .replace(/\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\n?/g, "")
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\n?/g,
+        "",
+      )
       .replace(/import \{[^}]*\} from '\.\/agenthosts\.js';\n?/g, "");
     expect(stripped).toContain("@nanoclaw-hosthooks:container-import:end");
-    expect(stripped).not.toContain("@nanoclaw-agenthosts:container-import:begin");
+    expect(stripped).not.toContain(
+      "@nanoclaw-agenthosts:container-import:begin",
+    );
     const patched = patchContainerRunner(stripped);
     expect(patched).toContain("@nanoclaw-agenthosts:container-import:begin");
   });
@@ -636,8 +640,14 @@ describe("coverage gaps for 2026.10 anchors", () => {
     }
     // Remove any existing sessions-import markers / agenthosts sessions import from a prior mental model
     source = source
-      .replace(/\/\/ @nanoclaw-agenthosts:sessions-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:sessions-import:end\n?/g, "")
-      .replace(/import \{ getSession \} from '\.\/db\/sessions\.js';\n/g, "import { getSession } from './db/sessions.js';\n");
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:sessions-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:sessions-import:end\n?/g,
+        "",
+      )
+      .replace(
+        /import \{ getSession \} from '\.\/db\/sessions\.js';\n/g,
+        "import { getSession } from './db/sessions.js';\n",
+      );
     const patched = patchContainerRunner(source);
     expect(patched).toContain("@nanoclaw-agenthosts:sessions-import:begin");
   });
