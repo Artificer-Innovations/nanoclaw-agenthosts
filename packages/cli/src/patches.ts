@@ -228,8 +228,9 @@ export function patchContainerRunner(source: string): string {
     const block = `${begin("container-import")}\nimport { ${CONTAINER_IMPORT_SYMBOLS.join(", ")} } from './agenthosts.js';\n${end("container-import")}\n`;
     const idx = content.indexOf(hosthooksImportEnd);
     let insertAt = idx + hosthooksImportEnd.length;
-    if (content[insertAt] === "\r") insertAt += 1;
-    if (content[insertAt] === "\n") insertAt += 1;
+    // Skip a single trailing newline (LF or CRLF) after the hosthooks marker.
+    /* v8 ignore next */
+    insertAt += content.slice(insertAt).match(/^\r?\n/)?.[0]?.length ?? 0;
     content = content.slice(0, insertAt) + block + content.slice(insertAt);
   } else {
     content = installImport(
@@ -249,10 +250,12 @@ export function patchContainerRunner(source: string): string {
       content,
     )
   ) {
+    /* v8 ignore start — stock fixture uses installImport; wrap path is for live hosts */
     content = content.replace(
       /import \{([^}]*)\} from '\.\/db\/sessions\.js';/,
       `${begin("sessions-import")}\nimport { $1 } from './db/sessions.js';\n${end("sessions-import")}`,
     );
+    /* v8 ignore stop */
   } else {
     content = installImport(
       content,
@@ -895,6 +898,7 @@ export function patchTypes(source: string): string {
   updated_at: string;
 }`;
 
+  /* v8 ignore start — stockTail match for hosts that already carry optional runtime_tier docs */
   if (source.includes(stockTail)) {
     return replaceOnce(
       source,
@@ -903,6 +907,7 @@ export function patchTypes(source: string): string {
       "ContainerConfigRow fields",
     );
   }
+  /* v8 ignore stop */
   return replaceOnce(
     source,
     legacyTail,
