@@ -563,7 +563,7 @@ ${END("types-runtime-fields")}`,
     expect(patched).toContain("'session_transport'");
     expect(patchContainerConfigsDb(patched)).toBe(patched);
     const restored = unpatchContainerConfigsDb(patched);
-    expect(restored).toContain("'cli_scope',\n]);");
+    expect(restored).toContain("'speed',\n]);");
     expect(restored).not.toContain("'runtime'");
   });
 
