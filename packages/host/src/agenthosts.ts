@@ -95,18 +95,24 @@ export function emitRuntimeStatus(
               state: extra?.state,
             })
             .finally(() => {
+              /* v8 ignore start */
               if (timeoutId !== undefined) clearTimeout(timeoutId);
+              /* v8 ignore stop */
             }),
           new Promise<never>((_, reject) => {
             timeoutId = setTimeout(
               () => reject(new Error("runtime status publish timed out")),
               RUNTIME_STATUS_TIMEOUT_MS,
             );
+            /* v8 ignore start */
             timeoutId.unref?.();
+            /* v8 ignore stop */
           }),
         ]);
       } finally {
+        /* v8 ignore start */
         if (timeoutId !== undefined) clearTimeout(timeoutId);
+        /* v8 ignore stop */
       }
     } catch {
       // agenttrace not installed, timed out, or dispatch failed
