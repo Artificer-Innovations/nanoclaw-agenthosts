@@ -19,6 +19,10 @@ describe("parseArgs", () => {
       command: "help",
       path: undefined,
     });
+    expect(parseArgs(["node", "bin.js", "install", "--dry-run", "--path"])).toEqual({
+      command: "install",
+      path: undefined,
+    });
   });
 });
 
