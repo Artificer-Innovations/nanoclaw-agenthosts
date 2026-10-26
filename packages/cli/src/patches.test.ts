@@ -587,7 +587,7 @@ ${END("types-runtime-fields")}`,
     expect(patchGroupsCli(patched)).toBe(patched);
     const restored = unpatchGroupsCli(patched);
     expect(restored).toContain(
-      "initGroupFilesystem(group);\n        return getAgentGroupByFolder(folder);",
+      "await initGroupFilesystem(group);\n        if (timezone) await updateContainerConfigScalars(id, { timezone });\n        return getAgentGroupByFolder(folder);",
     );
     expect(restored).not.toContain("listRegisteredRuntimes");
   });

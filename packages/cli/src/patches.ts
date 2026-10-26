@@ -1354,7 +1354,7 @@ export function unpatchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --runtime, --session-transport',
           );
         }`,
       ),
@@ -1368,7 +1368,7 @@ export function unpatchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }`,
       "restore config update fields",
@@ -1378,8 +1378,35 @@ export function unpatchGroupsCli(source: string): string {
   if (content.includes(begin("groups-config-update-type"))) {
     content = replaceOnce(
       content,
-      marked("groups-config-update-type", PATCHED_SCALARS_PICK),
-      STOCK_SCALARS_PICK,
+      marked(
+        "groups-config-update-type",
+        `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+            | 'runtime'
+            | 'session_transport'
+          >`,
+      ),
+      `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+          >`,
       "restore groups pick type",
     );
   }
@@ -1390,10 +1417,14 @@ export function unpatchGroupsCli(source: string): string {
       marked(
         "groups-config-update-desc",
         `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
       ),
       `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
       "restore config update description",
     );
   }
@@ -1403,7 +1434,8 @@ export function unpatchGroupsCli(source: string): string {
       content,
       marked(
         "groups-create-runtime",
-        `        initGroupFilesystem(group);
+        `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         if (args.runtime !== undefined || args['session-transport'] !== undefined || args.session_transport !== undefined) {
           const stamped: Partial<Pick<ContainerConfigRow, 'runtime' | 'session_transport'>> = {};
           if (args.runtime !== undefined) {
@@ -1418,16 +1450,29 @@ export function unpatchGroupsCli(source: string): string {
           }
           const transport = args['session-transport'] ?? args.session_transport;
           if (transport !== undefined) stamped.session_transport = String(transport);
-          updateContainerConfigScalars(id, stamped);
+          await updateContainerConfigScalars(id, stamped);
         }
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
       ),
-      `        initGroupFilesystem(group);
+      `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
       "restore groups create",
@@ -1440,6 +1485,7 @@ export function unpatchGroupsCli(source: string): string {
       marked(
         "groups-present-config",
         `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     runtime: row.runtime,
     session_transport: row.session_transport,
     updated_at: row.updated_at,
@@ -1447,6 +1493,7 @@ export function unpatchGroupsCli(source: string): string {
 }`,
       ),
       `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     updated_at: row.updated_at,
   };
 }`,
