@@ -316,7 +316,10 @@ export function patchContainerRunner(source: string): string {
     "function killContainerDocker(sessionId: string, reason: string, onExit?: () => void): void {";
   const insertAt = endOfFunction(content, killSig);
 
-  const registerBlock = marked("docker-register", dockerRegisterBody());
+  const registerBlock = marked(
+    "docker-register",
+    dockerRegisterBody(hostImportsCleanupOrphans(content)),
+  );
 
   const exportsBlock = marked("public-exports", publicExportsBody());
 
@@ -332,7 +335,20 @@ export function patchContainerRunner(source: string): string {
   return applyDockerRuntimeStatusPatches(content);
 }
 
-function dockerRegisterBody(): string {
+/** True when this host still exports cleanupOrphans from container-runtime (pre-v2026.10). */
+function hostImportsCleanupOrphans(source: string): boolean {
+  return (
+    source.includes(PATCHED_RUNTIME_IMPORT) ||
+    /import \{[^}]*\bcleanupOrphans\b[^}]*\} from ['"]\.\/container-runtime\.js['"]/.test(
+      source,
+    )
+  );
+}
+
+function dockerRegisterBody(includeCleanupOrphans: boolean): string {
+  const cleanupLine = includeCleanupOrphans
+    ? "  cleanupOrphans,\n"
+    : "  // v2026.10+: orphan sweep is SessionDriver-owned; no cleanupOrphans export.\n";
   return `setContainerConfigReader((agentGroupId) => {
   const row = getContainerConfig(agentGroupId);
   if (!row) return undefined;
@@ -359,8 +375,7 @@ registerRuntimeDriver('docker', {
   wake: (session, ctx) => wakeContainerDocker(session as Session, ctx),
   kill: killContainerDocker,
   isRunning: isContainerRunningDocker,
-  // v2026.10+: orphan sweep is SessionDriver-owned; no cleanupOrphans export.
-});`;
+${cleanupLine}});`;
 }
 
 function refreshDockerRegister(source: string): string {
@@ -382,7 +397,10 @@ function refreshDockerRegister(source: string): string {
   const cut = afterEnd + trailingNewline + trailingCr;
   return (
     source.slice(0, start) +
-    marked("docker-register", dockerRegisterBody()) +
+    marked(
+      "docker-register",
+      dockerRegisterBody(hostImportsCleanupOrphans(source)),
+    ) +
     "\n" +
     source.slice(cut)
   );

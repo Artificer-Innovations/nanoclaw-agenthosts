@@ -246,6 +246,34 @@ describe("patchContainerRunner", () => {
     expect(patched).toContain("registerRuntimeDriver('docker'");
   });
 
+  it("wires cleanupOrphans onto the docker driver for legacy hosts", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+    );
+    // Fixture is legacy-shaped (full container-runtime import).
+    expect(source).toContain("hostGatewayArgs");
+    const patched = patchContainerRunner(source);
+    expect(patched).toMatch(
+      /registerRuntimeDriver\('docker', \{[\s\S]*?\bcleanupOrphans,\s*\n/,
+    );
+  });
+
+  it("omits cleanupOrphans from the docker driver on v2026.10 hosts", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain("registerRuntimeDriver('docker'");
+    expect(patched).toContain(
+      "orphan sweep is SessionDriver-owned; no cleanupOrphans export",
+    );
+    expect(patched).not.toMatch(
+      /registerRuntimeDriver\('docker', \{[\s\S]*?\bcleanupOrphans,\s*\n/,
+    );
+  });
+
   it("accepts v2026.10 slim container-runtime import without inventing cleanupOrphans", () => {
     const source = fixtureSources.containerRunner.replace(
       "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
