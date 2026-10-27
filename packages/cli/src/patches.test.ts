@@ -246,6 +246,49 @@ describe("patchContainerRunner", () => {
     expect(patched).toContain("registerRuntimeDriver('docker'");
   });
 
+  it("wires cleanupOrphans onto the docker driver for legacy hosts", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+    );
+    // Fixture is legacy-shaped (full container-runtime import).
+    expect(source).toContain("hostGatewayArgs");
+    const patched = patchContainerRunner(source);
+    expect(patched).toMatch(
+      /registerRuntimeDriver\('docker', \{[\s\S]*?\bcleanupOrphans,\s*\n/,
+    );
+  });
+
+  it("omits cleanupOrphans from the docker driver on v2026.10 hosts", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain("registerRuntimeDriver('docker'");
+    expect(patched).toContain(
+      "orphan sweep is SessionDriver-owned; no cleanupOrphans export",
+    );
+    expect(patched).not.toMatch(
+      /registerRuntimeDriver\('docker', \{[\s\S]*?\bcleanupOrphans,\s*\n/,
+    );
+  });
+
+  it("accepts v2026.10 slim container-runtime import without inventing cleanupOrphans", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain(
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    expect(patched).not.toMatch(
+      /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
+    );
+    expect(patched).toContain("registerRuntimeDriver('docker'");
+  });
+
   it("throws when container-runtime import cannot gain cleanupOrphans", () => {
     const source = fixtureSources.containerRunner.replace(
       "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
@@ -371,6 +414,27 @@ describe("patchIndex", () => {
     expect(restored).toMatch(
       /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
     );
+    expect(restored).not.toContain("@nanoclaw-agenthosts:");
+  });
+
+  it("inserts orphan cleanup after adoptRunningSessions on v2026.10 hosts", () => {
+    const source = `import { adoptRunningSessions } from './container-runner.js';
+
+async function main(): Promise<void> {
+  await adoptRunningSessions();
+  startHostSweep();
+}
+`;
+    const patched = patchIndex(source);
+    expect(patched).toContain("await adoptRunningSessions();");
+    expect(patched).toContain("await runRuntimeOrphanCleanup()");
+    expect(patched.lastIndexOf("await adoptRunningSessions()")).toBeLessThan(
+      patched.indexOf("await runRuntimeOrphanCleanup()"),
+    );
+    const restored = unpatchIndex(patched);
+    expect(restored).toContain("await adoptRunningSessions();");
+    expect(restored).not.toContain("runRuntimeOrphanCleanup");
+    expect(restored).not.toContain("cleanupOrphans();");
     expect(restored).not.toContain("@nanoclaw-agenthosts:");
   });
 
@@ -527,16 +591,16 @@ ${END("types-runtime-fields")}`,
     expect(patched).toContain("'session_transport'");
     expect(patchContainerConfigsDb(patched)).toBe(patched);
     const restored = unpatchContainerConfigsDb(patched);
-    expect(restored).toContain("'cli_scope',\n]);");
+    expect(restored).toContain("'speed',\n]);");
     expect(restored).not.toContain("'runtime'");
   });
 
-  it("registers migration020", () => {
+  it("registers migration026", () => {
     const patched = patchMigrationsIndex(fixtureSources.migrationsIndex);
-    expect(patched).toContain("from './020-agenthosts-runtime.js'");
-    expect(patched).toContain("migration020");
+    expect(patched).toContain("from './026-agenthosts-runtime.js'");
+    expect(patched).toContain("migration026");
     expect(patchMigrationsIndex(patched)).toBe(patched);
-    expect(unpatchMigrationsIndex(patched)).not.toContain("migration020");
+    expect(unpatchMigrationsIndex(patched)).not.toContain("migration026");
   });
 
   it("adds ncl --runtime wiring", () => {
@@ -551,13 +615,103 @@ ${END("types-runtime-fields")}`,
     expect(patchGroupsCli(patched)).toBe(patched);
     const restored = unpatchGroupsCli(patched);
     expect(restored).toContain(
-      "initGroupFilesystem(group);\n        return getAgentGroupByFolder(folder);",
+      "await initGroupFilesystem(group);\n        if (timezone) await updateContainerConfigScalars(id, { timezone });\n        return getAgentGroupByFolder(folder);",
     );
     expect(restored).not.toContain("listRegisteredRuntimes");
   });
 });
 
+describe("coverage gaps for 2026.10 anchors", () => {
+  it("accepts CRLF after hosthooks container-import end marker", () => {
+    const base = fixtureSources.containerRunner
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\r?\n?/g,
+        "",
+      )
+      .replace(/import \{[^}]*\} from '\.\/agenthosts\.js';\r?\n?/g, "");
+    const withCrlf = base.replace(
+      "// @nanoclaw-hosthooks:container-import:end\n",
+      "// @nanoclaw-hosthooks:container-import:end\r\n",
+    );
+    expect(withCrlf).toContain("\r\n");
+    const patched = patchContainerRunner(withCrlf);
+    expect(patched).toContain("@nanoclaw-agenthosts:container-import:begin");
+  });
+
+  it("inserts container-import after hosthooks marker on a full runner fixture", () => {
+    const source = fixtureSources.containerRunner
+      .replace("@nanoclaw-hosthooks:container-import:begin", "REMOVED_BEGIN")
+      .replace(
+        /\/\/ @nanoclaw-hosthooks:container-import:begin[\s\S]*?\/\/ @nanoclaw-hosthooks:container-import:end\n/,
+        "// @nanoclaw-hosthooks:container-import:end\n",
+      );
+    // Ensure hosthooks end marker remains without agenthosts import yet
+    const stripped = source
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\n?/g,
+        "",
+      )
+      .replace(/import \{[^}]*\} from '\.\/agenthosts\.js';\n?/g, "");
+    expect(stripped).toContain("@nanoclaw-hosthooks:container-import:end");
+    expect(stripped).not.toContain(
+      "@nanoclaw-agenthosts:container-import:begin",
+    );
+    const patched = patchContainerRunner(stripped);
+    expect(patched).toContain("@nanoclaw-agenthosts:container-import:begin");
+  });
+
+  it("wraps an existing getSession import when present before patch", () => {
+    let source = fixtureSources.containerRunner;
+    // Inject getSession import ahead of patching if missing
+    if (!source.includes("from './db/sessions.js'")) {
+      source = "import { getSession } from './db/sessions.js';\n" + source;
+    }
+    // Remove any existing sessions-import markers / agenthosts sessions import from a prior mental model
+    source = source
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:sessions-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:sessions-import:end\n?/g,
+        "",
+      )
+      .replace(
+        /import \{ getSession \} from '\.\/db\/sessions\.js';\n/g,
+        "import { getSession } from './db/sessions.js';\n",
+      );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain("@nanoclaw-agenthosts:sessions-import:begin");
+  });
+
+  it("no-ops delivery when modern deliverToSessions drain is present", () => {
+    const modern = `async function pollActive(): Promise<void> {
+  await deliverToSessions(await getRunningSessions());
+}
+`;
+    expect(patchDelivery(modern)).toBe(modern);
+  });
+
+  it("throws when index orphan-cleanup anchors are missing after import", () => {
+    expect(() =>
+      patchIndex(`import { adoptRunningSessions } from './session-manager.js';
+export async function main() {}
+`),
+    ).toThrow(/orphan-cleanup anchor/);
+  });
+});
+
 describe("patchDelivery", () => {
+  it("no-ops when pollActive already uses deliverToSessions(getRunningSessions)", () => {
+    const modern = `async function pollActive(): Promise<void> {
+  if (!activePolling) return;
+  try {
+    await deliverToSessions(await getRunningSessions());
+  } catch (err) {
+    log.error('Active delivery poll error', { err });
+  }
+  setTimeout(pollActive, ACTIVE_POLL_MS);
+}
+`;
+    expect(patchDelivery(modern)).toBe(modern);
+  });
+
   it("keeps } catch on its own line after pollActive heal patch", () => {
     const once = patchDelivery(fixtureSources.delivery);
     expect(once).toMatch(

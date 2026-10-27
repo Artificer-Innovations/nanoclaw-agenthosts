@@ -12,7 +12,7 @@ import {
 
 describe("paths", () => {
   it("locates resources", () => {
-    expect(packageRoot()).toMatch(/nanoclaw-agenthosts$/);
+    expect(packageRoot()).toMatch(/nanoclaw-agenthosts(-develop)?$/);
     expect(skillDir()).toContain("add-agenthosts");
     expect(hostResourcesDir()).toContain("host");
     expect(readPackageVersion()).toMatch(/^\d+\.\d+\.\d+/);
