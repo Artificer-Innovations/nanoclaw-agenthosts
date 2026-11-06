@@ -1666,6 +1666,25 @@ export function unpatchGroupsCli(source: string): string {
   return content;
 }
 
+/** v2026.10+ stock drain: `await deliverToSessions(await getRunningSessions())`. */
+const MODERN_DELIVER_TO_SESSIONS =
+  /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/;
+
+const DELIVERY_MARKER_NAMES = [
+  "delivery-heal-import",
+  "delivery-heal-session-import",
+  "delivery-pollactive-heal",
+] as const;
+
+/** True when source has the modern drain and no agenthosts delivery heal markers. */
+function isUnmarkedModernDelivery(source: string): boolean {
+  return (
+    MODERN_DELIVER_TO_SESSIONS.test(source) &&
+    !source.includes("markContainerRunning(session.id)") &&
+    !DELIVERY_MARKER_NAMES.some((name) => source.includes(begin(name)))
+  );
+}
+
 /** Stock pollActive drain loop (DB container_status only). */
 export const STOCK_POLLACTIVE_BODY = `    const sessions = getRunningSessions();
     for (const session of sessions) {
@@ -1774,11 +1793,7 @@ function restoreStockPollActiveBody(content: string): string {
   // Primary guard is unpatchDelivery's early-return; this is defense-in-depth when
   // markers were already removed but the modern drain remains.
   /* v8 ignore start */
-  if (
-    /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/.test(
-      pollFn,
-    )
-  ) {
+  if (MODERN_DELIVER_TO_SESSIONS.test(pollFn)) {
     return content;
   }
   /* v8 ignore stop */
@@ -1796,26 +1811,17 @@ function restoreStockPollActiveBody(content: string): string {
 }
 
 export function patchDelivery(source: string): string {
-  const names = [
-    "delivery-heal-import",
-    "delivery-heal-session-import",
-    "delivery-pollactive-heal",
-  ];
   // v2026.10+: pollActive already drains via deliverToSessions(getRunningSessions()).
   // Legacy markContainerRunning heal is unnecessary; leave delivery untouched.
-  if (
-    /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/.test(
-      source,
-    ) &&
-    !source.includes("markContainerRunning(session.id)") &&
-    !names.some((name) => source.includes(begin(name)))
-  ) {
+  if (isUnmarkedModernDelivery(source)) {
     return source;
   }
   let content = source;
 
-  const present = names.filter((name) => content.includes(begin(name)));
-  if (present.length > 0 && present.length < names.length) {
+  const present = DELIVERY_MARKER_NAMES.filter((name) =>
+    content.includes(begin(name)),
+  );
+  if (present.length > 0 && present.length < DELIVERY_MARKER_NAMES.length) {
     content = unpatchDelivery(content);
   } else if (
     content.includes("markContainerRunning(session.id)") &&
@@ -1824,7 +1830,7 @@ export function patchDelivery(source: string): string {
     content = unpatchDelivery(content);
   }
 
-  if (isFullyPatched(content, names)) return content;
+  if (isFullyPatched(content, [...DELIVERY_MARKER_NAMES])) return content;
 
   content = installImport(
     content,
@@ -1861,19 +1867,8 @@ export function patchDelivery(source: string): string {
 }
 
 export function unpatchDelivery(source: string): string {
-  const names = [
-    "delivery-heal-import",
-    "delivery-heal-session-import",
-    "delivery-pollactive-heal",
-  ];
   // Never-touched v2026.10 hosts: leave stock deliverToSessions drain alone.
-  if (
-    /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/.test(
-      source,
-    ) &&
-    !source.includes("markContainerRunning(session.id)") &&
-    !names.some((name) => source.includes(begin(name)))
-  ) {
+  if (isUnmarkedModernDelivery(source)) {
     return source;
   }
 
