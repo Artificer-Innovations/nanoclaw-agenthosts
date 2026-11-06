@@ -48,7 +48,7 @@ describe("install / verify / uninstall", () => {
     expect(fs.existsSync(path.join(root, "src/agenthosts.ts"))).toBe(true);
     expect(
       fs.existsSync(
-        path.join(root, "src/db/migrations/020-agenthosts-runtime.ts"),
+        path.join(root, "src/db/migrations/026-agenthosts-runtime.ts"),
       ),
     ).toBe(true);
     expect(
@@ -110,6 +110,14 @@ describe("install / verify / uninstall", () => {
     expect(removed.removed).not.toContain("src/warn-once.ts");
     expect(fs.existsSync(path.join(root, "src/warn-once.ts"))).toBe(true);
     expect(fs.existsSync(path.join(root, "src/agenthosts.ts"))).toBe(false);
+  });
+
+  it("uninstall skips copy targets and skill dir that were never installed", () => {
+    const root = tempRoot();
+    writeFixtureTree(root, fs, path);
+    const removed = runUninstall(root);
+    expect(removed.removed).not.toContain("src/agenthosts.ts");
+    expect(removed.removed).not.toContain(".claude/skills/add-agenthosts");
   });
 
   it("removes warn-once.ts on uninstall when hosthooks is absent", () => {

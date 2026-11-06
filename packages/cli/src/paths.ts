@@ -13,8 +13,8 @@ export const HOST_COPY_RULES: CopyRule[] = [
   { source: "warn-once.ts", dest: "src/warn-once.ts" },
   { source: "agenthosts.ts", dest: "src/agenthosts.ts" },
   {
-    source: "020-agenthosts-runtime.ts",
-    dest: "src/db/migrations/020-agenthosts-runtime.ts",
+    source: "026-agenthosts-runtime.ts",
+    dest: "src/db/migrations/026-agenthosts-runtime.ts",
   },
 ];
 
@@ -71,6 +71,7 @@ export function readPackageVersion(): string {
   const pkg = JSON.parse(
     fs.readFileSync(path.join(packageRoot(), "package.json"), "utf8"),
   ) as { version?: string };
-  /* v8 ignore next */
+  /* v8 ignore start */
   return pkg.version ?? "0.0.0";
+  /* v8 ignore stop */
 }

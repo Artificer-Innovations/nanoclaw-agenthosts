@@ -21,7 +21,7 @@ copy(
   "skills/add-agenthosts/resources/host/agenthosts.ts",
 );
 copy(
-  "packages/host/src/020-agenthosts-runtime.ts",
-  "skills/add-agenthosts/resources/host/020-agenthosts-runtime.ts",
+  "packages/host/src/026-agenthosts-runtime.ts",
+  "skills/add-agenthosts/resources/host/026-agenthosts-runtime.ts",
 );
 console.log("Synced agenthosts resources");

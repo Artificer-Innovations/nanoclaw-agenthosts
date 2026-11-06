@@ -197,6 +197,81 @@ describe("patchContainerRunner", () => {
     expect(restored).not.toContain("getSession");
   });
 
+  it("preserves stock getSession import outside sessions-import markers", () => {
+    const withStock = fixtureSources.containerRunner.replace(
+      "import { writeSessionRouting } from './session-manager.js';\n",
+      "import { getSession } from './db/sessions.js';\nimport { writeSessionRouting } from './session-manager.js';\n",
+    );
+    const patched = patchContainerRunner(withStock);
+    // Stock import stays unmarked; markers are empty anchors.
+    expect(patched).toMatch(
+      /import \{ getSession \} from '\.\/db\/sessions\.js';\n\/\/ @nanoclaw-agenthosts:sessions-import:begin\n\/\/ @nanoclaw-agenthosts:sessions-import:end/,
+    );
+    const restored = unpatchContainerRunner(patched);
+    expect(restored).toContain(
+      "import { getSession } from './db/sessions.js';",
+    );
+    expect(restored).not.toContain("@nanoclaw-agenthosts:sessions-import");
+  });
+
+  it("unwraps multi-symbol stock getSession from sessions-import on upgrade", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate older wrap that nested a richer stock import inside the marker.
+    const wrapped = installed.replace(
+      new RegExp(
+        `${BEGIN("sessions-import")}\\n[\\s\\S]*?${END("sessions-import")}\\n?`,
+      ),
+      `${BEGIN("sessions-import")}
+import { getSession, listSessions } from './db/sessions.js';
+${END("sessions-import")}
+`,
+    );
+    const refreshed = patchContainerRunner(wrapped);
+    expect(refreshed).toMatch(
+      /import \{ getSession, listSessions \} from '\.\/db\/sessions\.js';\n\/\/ @nanoclaw-agenthosts:sessions-import:begin\n\/\/ @nanoclaw-agenthosts:sessions-import:end/,
+    );
+    const restored = unpatchContainerRunner(refreshed);
+    expect(restored).toContain(
+      "import { getSession, listSessions } from './db/sessions.js';",
+    );
+  });
+
+  it("patches container-runner without hosthooks markers via installImport", () => {
+    const noHosthooks = fixtureSources.containerRunner.replace(
+      /\/\/ @nanoclaw-hosthooks:container-import:begin[\s\S]*?\/\/ @nanoclaw-hosthooks:container-import:end\n/,
+      "",
+    );
+    expect(noHosthooks).not.toContain("hosthooks");
+    const patched = patchContainerRunner(noHosthooks);
+    expect(patched).toContain("@nanoclaw-agenthosts:container-import:begin");
+    expect(patched).toContain("registerRuntimeDriver");
+  });
+
+  it("relocates nested container-import outside hosthooks on upgrade", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate pre-0.2.1 placement: move agenthosts container-import inside hosthooks.
+    const ahBlockRe = new RegExp(
+      `${BEGIN("container-import").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n[\\s\\S]*?${END("container-import").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`,
+    );
+    const ahBlock = installed.match(ahBlockRe)?.[0];
+    expect(ahBlock).toBeTruthy();
+    const withoutAh = installed.replace(ahBlockRe, "");
+    const nested = withoutAh.replace(
+      "// @nanoclaw-hosthooks:container-import:end\n",
+      `${ahBlock}// @nanoclaw-hosthooks:container-import:end\n`,
+    );
+    expect(nested.indexOf(BEGIN("container-import"))).toBeLessThan(
+      nested.indexOf("// @nanoclaw-hosthooks:container-import:end"),
+    );
+    const refreshed = patchContainerRunner(nested);
+    const hhEnd = refreshed.indexOf(
+      "// @nanoclaw-hosthooks:container-import:end",
+    );
+    const ahBegin = refreshed.indexOf(BEGIN("container-import"));
+    expect(hhEnd).toBeGreaterThan(-1);
+    expect(ahBegin).toBeGreaterThan(hhEnd);
+  });
+
   it("only falls back to docker when runtime resolves to docker", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     expect(patched).toContain("if (runtime === 'docker')");
@@ -243,6 +318,49 @@ describe("patchContainerRunner", () => {
     );
     const patched = patchContainerRunner(source);
     expect(patched).toContain("cleanupOrphans");
+    expect(patched).toContain("registerRuntimeDriver('docker'");
+  });
+
+  it("wires cleanupOrphans onto the docker driver for legacy hosts", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+    );
+    // Fixture is legacy-shaped (full container-runtime import).
+    expect(source).toContain("hostGatewayArgs");
+    const patched = patchContainerRunner(source);
+    expect(patched).toMatch(
+      /registerRuntimeDriver\('docker', \{[\s\S]*?\bcleanupOrphans,\s*\n/,
+    );
+  });
+
+  it("omits cleanupOrphans from the docker driver on v2026.10 hosts", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain("registerRuntimeDriver('docker'");
+    expect(patched).toContain(
+      "orphan sweep is SessionDriver-owned; no cleanupOrphans export",
+    );
+    expect(patched).not.toMatch(
+      /registerRuntimeDriver\('docker', \{[\s\S]*?\bcleanupOrphans,\s*\n/,
+    );
+  });
+
+  it("accepts v2026.10 slim container-runtime import without inventing cleanupOrphans", () => {
+    const source = fixtureSources.containerRunner.replace(
+      "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';",
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain(
+      "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';",
+    );
+    expect(patched).not.toMatch(
+      /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
+    );
     expect(patched).toContain("registerRuntimeDriver('docker'");
   });
 
@@ -371,6 +489,27 @@ describe("patchIndex", () => {
     expect(restored).toMatch(
       /import \{[^}]*\bcleanupOrphans\b[^}]*\} from '\.\/container-runtime\.js'/,
     );
+    expect(restored).not.toContain("@nanoclaw-agenthosts:");
+  });
+
+  it("inserts orphan cleanup after adoptRunningSessions on v2026.10 hosts", () => {
+    const source = `import { adoptRunningSessions } from './container-runner.js';
+
+async function main(): Promise<void> {
+  await adoptRunningSessions();
+  startHostSweep();
+}
+`;
+    const patched = patchIndex(source);
+    expect(patched).toContain("await adoptRunningSessions();");
+    expect(patched).toContain("await runRuntimeOrphanCleanup()");
+    expect(patched.lastIndexOf("await adoptRunningSessions()")).toBeLessThan(
+      patched.indexOf("await runRuntimeOrphanCleanup()"),
+    );
+    const restored = unpatchIndex(patched);
+    expect(restored).toContain("await adoptRunningSessions();");
+    expect(restored).not.toContain("runRuntimeOrphanCleanup");
+    expect(restored).not.toContain("cleanupOrphans();");
     expect(restored).not.toContain("@nanoclaw-agenthosts:");
   });
 
@@ -527,16 +666,97 @@ ${END("types-runtime-fields")}`,
     expect(patched).toContain("'session_transport'");
     expect(patchContainerConfigsDb(patched)).toBe(patched);
     const restored = unpatchContainerConfigsDb(patched);
-    expect(restored).toContain("'cli_scope',\n]);");
+    expect(restored).toContain("'speed',\n]);");
     expect(restored).not.toContain("'runtime'");
   });
 
-  it("registers migration020", () => {
+  it("registers migration026", () => {
     const patched = patchMigrationsIndex(fixtureSources.migrationsIndex);
-    expect(patched).toContain("from './020-agenthosts-runtime.js'");
-    expect(patched).toContain("migration020");
+    expect(patched).toContain("from './026-agenthosts-runtime.js'");
+    expect(patched).toContain("migration026");
     expect(patchMigrationsIndex(patched)).toBe(patched);
-    expect(unpatchMigrationsIndex(patched)).not.toContain("migration020");
+    expect(unpatchMigrationsIndex(patched)).not.toContain("migration026");
+  });
+
+  it("refreshes migration020 markers to migration026 on upgrade", () => {
+    const stale = `import { migration025 } from './025-container-config-speed.js';
+${BEGIN("migrations-import")}
+import { migration020 } from './020-agenthosts-runtime.js';
+${END("migrations-import")}
+export const migrations = [
+  migration025,
+${BEGIN("migrations-register")}
+  migration020,
+${END("migrations-register")}
+];
+`;
+    const refreshed = patchMigrationsIndex(stale);
+    expect(refreshed).toContain("from './026-agenthosts-runtime.js'");
+    expect(refreshed).toContain("migration026");
+    expect(refreshed).not.toContain("migration020");
+    expect(refreshed).not.toContain("020-agenthosts");
+  });
+
+  it("unpatchTypes preserves modern stock fields when marker is fields-only", () => {
+    const modern = `export interface ContainerConfigRow {
+  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  updated_at: string;
+}`;
+    const patched = patchTypes(modern);
+    expect(patched).toContain(
+      "@nanoclaw-agenthosts:types-runtime-fields:begin",
+    );
+    expect(patched).toContain("runtime?: string | null");
+    const restored = unpatchTypes(patched);
+    expect(restored).toContain("timezone: string | null");
+    expect(restored).toContain("runtime_tier?: string | null");
+    expect(restored).not.toContain("session_transport");
+    expect(restored).not.toContain("@nanoclaw-agenthosts:types-runtime-fields");
+  });
+
+  it("migrates and uninstalls legacy wrapped-modern types marker", () => {
+    const legacyWrapped = `export interface ContainerConfigRow {
+${BEGIN("types-runtime-fields")}
+  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
+  runtime?: string | null;
+  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
+  session_transport?: string | null;
+  updated_at: string;
+}
+${END("types-runtime-fields")}
+}`;
+    // Upgrade path: shrink marker to agenthosts fields only.
+    const migrated = patchTypes(legacyWrapped);
+    expect(migrated).toContain("timezone: string | null");
+    expect(migrated).toMatch(
+      /runtime_tier\?: string \| null;\n\/\/ @nanoclaw-agenthosts:types-runtime-fields:begin/,
+    );
+    expect(unpatchTypes(migrated)).not.toContain("session_transport");
+
+    // Direct uninstall of the old wrapped form.
+    const restored = unpatchTypes(legacyWrapped);
+    expect(restored).toContain("runtime_tier?: string | null");
+    expect(restored).not.toContain("session_transport");
+    expect(restored).not.toContain("@nanoclaw-agenthosts:types-runtime-fields");
   });
 
   it("adds ncl --runtime wiring", () => {
@@ -551,13 +771,119 @@ ${END("types-runtime-fields")}`,
     expect(patchGroupsCli(patched)).toBe(patched);
     const restored = unpatchGroupsCli(patched);
     expect(restored).toContain(
-      "initGroupFilesystem(group);\n        return getAgentGroupByFolder(folder);",
+      "await initGroupFilesystem(group);\n        if (timezone) await updateContainerConfigScalars(id, { timezone });\n        return getAgentGroupByFolder(folder);",
     );
     expect(restored).not.toContain("listRegisteredRuntimes");
   });
 });
 
+describe("coverage gaps for 2026.10 anchors", () => {
+  it("accepts CRLF after hosthooks container-import end marker", () => {
+    const base = fixtureSources.containerRunner
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\r?\n?/g,
+        "",
+      )
+      .replace(/import \{[^}]*\} from '\.\/agenthosts\.js';\r?\n?/g, "");
+    const withCrlf = base.replace(
+      "// @nanoclaw-hosthooks:container-import:end\n",
+      "// @nanoclaw-hosthooks:container-import:end\r\n",
+    );
+    expect(withCrlf).toContain("\r\n");
+    const patched = patchContainerRunner(withCrlf);
+    expect(patched).toContain("@nanoclaw-agenthosts:container-import:begin");
+  });
+
+  it("inserts container-import after hosthooks marker on a full runner fixture", () => {
+    const source = fixtureSources.containerRunner
+      .replace("@nanoclaw-hosthooks:container-import:begin", "REMOVED_BEGIN")
+      .replace(
+        /\/\/ @nanoclaw-hosthooks:container-import:begin[\s\S]*?\/\/ @nanoclaw-hosthooks:container-import:end\n/,
+        "// @nanoclaw-hosthooks:container-import:end\n",
+      );
+    // Ensure hosthooks end marker remains without agenthosts import yet
+    const stripped = source
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:container-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:container-import:end\n?/g,
+        "",
+      )
+      .replace(/import \{[^}]*\} from '\.\/agenthosts\.js';\n?/g, "");
+    expect(stripped).toContain("@nanoclaw-hosthooks:container-import:end");
+    expect(stripped).not.toContain(
+      "@nanoclaw-agenthosts:container-import:begin",
+    );
+    const patched = patchContainerRunner(stripped);
+    expect(patched).toContain("@nanoclaw-agenthosts:container-import:begin");
+  });
+
+  it("wraps an existing getSession import when present before patch", () => {
+    let source = fixtureSources.containerRunner;
+    // Inject getSession import ahead of patching if missing
+    if (!source.includes("from './db/sessions.js'")) {
+      source = "import { getSession } from './db/sessions.js';\n" + source;
+    }
+    // Remove any existing sessions-import markers / agenthosts sessions import from a prior mental model
+    source = source
+      .replace(
+        /\/\/ @nanoclaw-agenthosts:sessions-import:begin[\s\S]*?\/\/ @nanoclaw-agenthosts:sessions-import:end\n?/g,
+        "",
+      )
+      .replace(
+        /import \{ getSession \} from '\.\/db\/sessions\.js';\n/g,
+        "import { getSession } from './db/sessions.js';\n",
+      );
+    const patched = patchContainerRunner(source);
+    expect(patched).toContain("@nanoclaw-agenthosts:sessions-import:begin");
+  });
+
+  it("no-ops delivery when modern deliverToSessions drain is present", () => {
+    const modern = `async function pollActive(): Promise<void> {
+  await deliverToSessions(await getRunningSessions());
+}
+`;
+    expect(patchDelivery(modern)).toBe(modern);
+  });
+
+  it("unpatchDelivery leaves unmarked modern deliverToSessions pollActive alone", () => {
+    const modern = `import { getRunningSessions } from './session-manager.js';
+async function pollActive(): Promise<void> {
+  try {
+    await deliverToSessions(await getRunningSessions());
+  } catch (err) {
+    log.error('pollActive failed', { err });
+  }
+  setTimeout(pollActive, ACTIVE_POLL_MS);
+}
+`;
+    expect(unpatchDelivery(modern)).toBe(modern);
+    expect(unpatchDelivery(modern)).not.toContain("deliverSessionMessages");
+    expect(unpatchDelivery(modern)).not.toContain("markContainerRunning");
+  });
+
+  it("throws when index orphan-cleanup anchors are missing after import", () => {
+    expect(() =>
+      patchIndex(`import { adoptRunningSessions } from './session-manager.js';
+export async function main() {}
+`),
+    ).toThrow(/orphan-cleanup anchor/);
+  });
+});
+
 describe("patchDelivery", () => {
+  it("no-ops when pollActive already uses deliverToSessions(getRunningSessions)", () => {
+    const modern = `async function pollActive(): Promise<void> {
+  if (!activePolling) return;
+  try {
+    await deliverToSessions(await getRunningSessions());
+  } catch (err) {
+    log.error('Active delivery poll error', { err });
+  }
+  setTimeout(pollActive, ACTIVE_POLL_MS);
+}
+`;
+    expect(patchDelivery(modern)).toBe(modern);
+  });
+
   it("keeps } catch on its own line after pollActive heal patch", () => {
     const once = patchDelivery(fixtureSources.delivery);
     expect(once).toMatch(

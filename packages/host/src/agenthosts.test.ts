@@ -18,7 +18,7 @@ import {
   type RuntimeDriver,
   type SessionRef,
 } from "./agenthosts.js";
-import { migration020 } from "./020-agenthosts-runtime.js";
+import { migration026 } from "./026-agenthosts-runtime.js";
 import { resetWarnOnceForTests, warnOnce } from "./warn-once.js";
 
 function stubDriver(overrides: Partial<RuntimeDriver> = {}): RuntimeDriver {
@@ -392,46 +392,42 @@ describe("warnOnce", () => {
   });
 });
 
-describe("migration020", () => {
-  it("adds runtime and session_transport when absent", () => {
+describe("migration026", () => {
+  it("adds runtime and session_transport when absent", async () => {
     const statements: string[] = [];
     const db = {
-      prepare(sql: string) {
+      async all(sql: string) {
         statements.push(sql);
-        return {
-          all: () => [{ name: "id" }, { name: "provider" }],
-          run: () => undefined,
-        };
+        return [{ name: "id" }, { name: "provider" }];
+      },
+      async exec(sql: string) {
+        statements.push(sql);
       },
     };
-    migration020.up(db);
-    expect(migration020.version).toBe(20);
-    expect(migration020.name).toBe("agenthosts-runtime");
-    expect(statements).toContain(
-      "ALTER TABLE container_configs ADD COLUMN runtime TEXT",
-    );
-    expect(statements).toContain(
-      "ALTER TABLE container_configs ADD COLUMN session_transport TEXT",
-    );
+    await migration026.up(db as never);
+    expect(migration026.version).toBe(26);
+    expect(migration026.name).toBe("agenthosts-runtime");
+    expect(statements.some((s) => s.includes("ADD COLUMN runtime"))).toBe(true);
+    expect(
+      statements.some((s) => s.includes("ADD COLUMN session_transport")),
+    ).toBe(true);
   });
 
-  it("is a no-op when columns already exist", () => {
+  it("is a no-op when columns already exist", async () => {
     const alters: string[] = [];
     const db = {
-      prepare(sql: string) {
-        return {
-          all: () => [
-            { name: "runtime" },
-            { name: "session_transport" },
-            { name: "id" },
-          ],
-          run: () => {
-            alters.push(sql);
-          },
-        };
+      async all() {
+        return [
+          { name: "runtime" },
+          { name: "session_transport" },
+          { name: "id" },
+        ];
+      },
+      async exec(sql: string) {
+        alters.push(sql);
       },
     };
-    migration020.up(db);
+    await migration026.up(db as never);
     expect(alters).toEqual([]);
   });
 });

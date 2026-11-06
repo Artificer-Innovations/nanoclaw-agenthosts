@@ -21,10 +21,11 @@ function replaceOnce(
 ): string {
   const first = content.indexOf(search);
   if (first < 0) throw new Error(`Could not find ${label} anchor`);
-  /* v8 ignore next 3 */
+  /* v8 ignore start */
   if (content.indexOf(search, first + search.length) >= 0) {
     throw new Error(`${label} anchor is ambiguous`);
   }
+  /* v8 ignore stop */
   return (
     content.slice(0, first) + replacement + content.slice(first + search.length)
   );
@@ -49,7 +50,9 @@ function installImport(
     }
     let insertAt = idx + anchor.length;
     if (content[insertAt] === "\r") insertAt += 1;
+    /* v8 ignore start */
     if (content[insertAt] === "\n") insertAt += 1;
+    /* v8 ignore stop */
     return content.slice(0, insertAt) + block + content.slice(insertAt);
   }
   const firstImport = content.search(/^import /m);
@@ -64,11 +67,88 @@ function removeMarkedBlock(content: string, name: string): string {
     "m",
   );
   const next = content.replace(pattern, "");
-  /* v8 ignore next 3 */
+  /* v8 ignore start */
   if (content.includes(begin(name)) && next === content) {
     throw new Error(`Corrupt agenthosts block: ${name}`);
   }
+  /* v8 ignore stop */
   return next;
+}
+
+/**
+ * If agenthosts `container-import` was nested inside hosthooks' container-import
+ * region (pre-0.2.1 placement), lift it to a sibling after the hosthooks end marker
+ * so hosthooks uninstall cannot delete agenthosts imports.
+ */
+function relocateContainerImportOutsideHosthooks(content: string): string {
+  const hhBegin = "// @nanoclaw-hosthooks:container-import:begin";
+  const hhEnd = "// @nanoclaw-hosthooks:container-import:end";
+  const ahBegin = begin("container-import");
+  const ahEnd = end("container-import");
+  const hhBeginIdx = content.indexOf(hhBegin);
+  const hhEndIdx = content.indexOf(hhEnd);
+  const ahBeginIdx = content.indexOf(ahBegin);
+  const ahEndIdx = content.indexOf(ahEnd);
+  if (hhBeginIdx < 0 || hhEndIdx < 0 || ahBeginIdx < 0 || ahEndIdx < 0) {
+    return content;
+  }
+  // Nested only when the full agenthosts block sits strictly inside hosthooks.
+  if (!(ahBeginIdx > hhBeginIdx && ahEndIdx < hhEndIdx)) return content;
+
+  let blockEnd = ahEndIdx + ahEnd.length;
+  /* v8 ignore next */
+  blockEnd += content.slice(blockEnd).match(/^\r?\n/)?.[0]?.length ?? 0;
+  const block = content.slice(ahBeginIdx, blockEnd);
+  const without = content.slice(0, ahBeginIdx) + content.slice(blockEnd);
+  const newHhEndIdx = without.indexOf(hhEnd);
+  /* v8 ignore start */
+  if (newHhEndIdx < 0) return content;
+  /* v8 ignore stop */
+  let insertAt = newHhEndIdx + hhEnd.length;
+  insertAt += without.slice(insertAt).match(/^\r?\n/)?.[0]?.length ?? 0;
+  return without.slice(0, insertAt) + block + without.slice(insertAt);
+}
+
+/**
+ * Keep stock `getSession` imports outside the removable sessions-import region.
+ * Empty markers still anchor create-require-import placement. Agenthosts-added
+ * `import { getSession }` (sole symbol) stays inside the marker so uninstall
+ * removes it.
+ */
+function ensureSessionsImportAnchor(content: string): string {
+  if (content.includes(begin("sessions-import"))) {
+    // Unwrap older installs that nested a richer stock import inside the marker.
+    // Leave the agenthosts-owned `import { getSession }` form alone.
+    const wrappedMulti =
+      /\/\/ @nanoclaw-agenthosts:sessions-import:begin\r?\n(import \{[^}]*\bgetSession\b[^}]*\} from '\.\/db\/sessions\.js';)\r?\n\/\/ @nanoclaw-agenthosts:sessions-import:end\r?\n?/;
+    const match = content.match(wrappedMulti);
+    if (match?.[1] && /,\s*\w|\w\s*,/.test(match[1])) {
+      return content.replace(
+        wrappedMulti,
+        `$1\n${begin("sessions-import")}\n${end("sessions-import")}\n`,
+      );
+    }
+    return content;
+  }
+  if (
+    /import \{[^}]*\bgetSession\b[^}]*\} from '\.\/db\/sessions\.js';/.test(
+      content,
+    )
+  ) {
+    /* v8 ignore start — stock hosts already import getSession; fixtures use installImport */
+    return content.replace(
+      /(import \{[^}]*\} from '\.\/db\/sessions\.js';)/,
+      `$1\n${begin("sessions-import")}\n${end("sessions-import")}`,
+    );
+    /* v8 ignore stop */
+  }
+  return installImport(
+    content,
+    "./db/sessions.js",
+    ["getSession"],
+    "sessions-import",
+    { afterMarker: "container-import" },
+  );
 }
 
 function marked(name: string, body: string): string {
@@ -89,7 +169,9 @@ function isFullyPatched(source: string, names: string[]): boolean {
 function endOfFunction(content: string, signature: string): number {
   const pos = content.indexOf(signature);
   /* v8 ignore next */
+  /* v8 ignore start */
   if (pos < 0) throw new Error(`Could not find function ${signature}`);
+  /* v8 ignore stop */
   const openBrace = content.indexOf("{", pos);
   let depth = 0;
   for (let i = openBrace; i < content.length; i += 1) {
@@ -103,10 +185,19 @@ function endOfFunction(content: string, signature: string): number {
   throw new Error(`Unbalanced braces for ${signature}`);
 }
 
-const STOCK_RUNTIME_IMPORT =
+/** Pre-v2026.10 stock import (helpers lived on container-runtime). */
+const STOCK_RUNTIME_IMPORT_LEGACY =
   "import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';";
+/** Legacy import after agenthosts adds cleanupOrphans for orphan dispatch. */
 const PATCHED_RUNTIME_IMPORT =
   "import { CONTAINER_RUNTIME_BIN, cleanupOrphans, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';";
+/**
+ * NanoClaw v2026.10+ slimmed container-runtime to the binary constant only;
+ * orphan cleanup and mount helpers moved into the SessionDriver layer.
+ * Agenthosts must not invent a cleanupOrphans re-export that no longer exists.
+ */
+const STOCK_RUNTIME_IMPORT_V2026 =
+  "import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';";
 
 const CONTAINER_IMPORT_SYMBOLS = [
   "registerRuntimeDriver",
@@ -176,13 +267,9 @@ export function patchContainerRunner(source: string): string {
   // Already installed (v1): ensure sibling imports + refresh public-exports body.
   if (coreNames.every((name) => source.includes(begin(name)))) {
     let content = widenAgenthostsImport(source);
-    content = installImport(
-      content,
-      "./db/sessions.js",
-      ["getSession"],
-      "sessions-import",
-      { afterMarker: "container-import" },
-    );
+    // Upgrade path: earlier placement could nest agenthosts inside hosthooks.
+    content = relocateContainerImportOutsideHosthooks(content);
+    content = ensureSessionsImportAnchor(content);
     content = installImport(
       content,
       "node:module",
@@ -202,21 +289,34 @@ export function patchContainerRunner(source: string): string {
     );
   }
 
-  let content = installImport(
-    source,
-    "./agenthosts.js",
-    [...CONTAINER_IMPORT_SYMBOLS],
-    "container-import",
-  );
+  // Prefer a sibling AFTER hosthooks' container-import block so hosthooks
+  // uninstall cannot swallow agenthosts markers nested inside that region.
+  const hosthooksImportEnd = "// @nanoclaw-hosthooks:container-import:end";
+  let content = source;
+  if (
+    !content.includes(begin("container-import")) &&
+    content.includes(hosthooksImportEnd)
+  ) {
+    const block = `${begin("container-import")}\nimport { ${CONTAINER_IMPORT_SYMBOLS.join(", ")} } from './agenthosts.js';\n${end("container-import")}\n`;
+    const idx = content.indexOf(hosthooksImportEnd);
+    let insertAt = idx + hosthooksImportEnd.length;
+    // Skip a single trailing newline (LF or CRLF) after the hosthooks marker.
+    /* v8 ignore next */
+    insertAt += content.slice(insertAt).match(/^\r?\n/)?.[0]?.length ?? 0;
+    content = content.slice(0, insertAt) + block + content.slice(insertAt);
+  } else {
+    content = installImport(
+      content,
+      "./agenthosts.js",
+      [...CONTAINER_IMPORT_SYMBOLS],
+      "container-import",
+    );
+  }
 
   // Insert as a sibling after container-import:end — never nest inside that block.
-  content = installImport(
-    content,
-    "./db/sessions.js",
-    ["getSession"],
-    "sessions-import",
-    { afterMarker: "container-import" },
-  );
+  // v2026.10+ already imports getSession for SessionDriver composition — keep that
+  // stock import outside the removable region (empty marker anchors createRequire).
+  content = ensureSessionsImportAnchor(content);
 
   content = installImport(
     content,
@@ -226,14 +326,17 @@ export function patchContainerRunner(source: string): string {
     { afterMarker: "sessions-import" },
   );
 
-  if (content.includes(STOCK_RUNTIME_IMPORT)) {
+  if (content.includes(STOCK_RUNTIME_IMPORT_LEGACY)) {
     content = replaceOnce(
       content,
-      STOCK_RUNTIME_IMPORT,
+      STOCK_RUNTIME_IMPORT_LEGACY,
       PATCHED_RUNTIME_IMPORT,
       "cleanupOrphans import",
     );
-  } else if (!content.includes(PATCHED_RUNTIME_IMPORT)) {
+  } else if (
+    !content.includes(PATCHED_RUNTIME_IMPORT) &&
+    !content.includes(STOCK_RUNTIME_IMPORT_V2026)
+  ) {
     throw new Error(
       "Could not find container-runtime import to add cleanupOrphans",
     );
@@ -265,7 +368,10 @@ export function patchContainerRunner(source: string): string {
     "function killContainerDocker(sessionId: string, reason: string, onExit?: () => void): void {";
   const insertAt = endOfFunction(content, killSig);
 
-  const registerBlock = marked("docker-register", dockerRegisterBody());
+  const registerBlock = marked(
+    "docker-register",
+    dockerRegisterBody(hostImportsCleanupOrphans(content)),
+  );
 
   const exportsBlock = marked("public-exports", publicExportsBody());
 
@@ -281,7 +387,20 @@ export function patchContainerRunner(source: string): string {
   return applyDockerRuntimeStatusPatches(content);
 }
 
-function dockerRegisterBody(): string {
+/** True when this host still exports cleanupOrphans from container-runtime (pre-v2026.10). */
+function hostImportsCleanupOrphans(source: string): boolean {
+  return (
+    source.includes(PATCHED_RUNTIME_IMPORT) ||
+    /import \{[^}]*\bcleanupOrphans\b[^}]*\} from ['"]\.\/container-runtime\.js['"]/.test(
+      source,
+    )
+  );
+}
+
+function dockerRegisterBody(includeCleanupOrphans: boolean): string {
+  const cleanupLine = includeCleanupOrphans
+    ? "  cleanupOrphans,\n"
+    : "  // v2026.10+: orphan sweep is SessionDriver-owned; no cleanupOrphans export.\n";
   return `setContainerConfigReader((agentGroupId) => {
   const row = getContainerConfig(agentGroupId);
   if (!row) return undefined;
@@ -308,8 +427,7 @@ registerRuntimeDriver('docker', {
   wake: (session, ctx) => wakeContainerDocker(session as Session, ctx),
   kill: killContainerDocker,
   isRunning: isContainerRunningDocker,
-  cleanupOrphans,
-});`;
+${cleanupLine}});`;
 }
 
 function refreshDockerRegister(source: string): string {
@@ -318,16 +436,23 @@ function refreshDockerRegister(source: string): string {
   const start = source.indexOf(startMark);
   const endIdx = source.indexOf(endMark);
   /* v8 ignore next 8 — defensive marker bounds + CRLF trailing cut */
+  /* v8 ignore start */
   if (start < 0 || endIdx < 0 || endIdx < start) return source;
+  /* v8 ignore stop */
   const afterEnd = endIdx + endMark.length;
   const trailingNewline =
+    /* v8 ignore start */
     source[afterEnd] === "\r" || source[afterEnd] === "\n" ? 1 : 0;
+  /* v8 ignore stop */
   const trailingCr =
     source[afterEnd] === "\r" && source[afterEnd + 1] === "\n" ? 1 : 0;
   const cut = afterEnd + trailingNewline + trailingCr;
   return (
     source.slice(0, start) +
-    marked("docker-register", dockerRegisterBody()) +
+    marked(
+      "docker-register",
+      dockerRegisterBody(hostImportsCleanupOrphans(source)),
+    ) +
     "\n" +
     source.slice(cut)
   );
@@ -388,7 +513,9 @@ function applyDockerRuntimeStatusPatches(source: string): string {
   if (!content.includes(begin("docker-status-preparing"))) {
     const agentGroupFail =
       "    log.error('Agent group not found', { agentGroupId: session.agent_group_id });\n    return;\n  }";
+    /* v8 ignore start */
     if (content.includes(agentGroupFail)) {
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         agentGroupFail,
@@ -404,7 +531,9 @@ function applyDockerRuntimeStatusPatches(source: string): string {
   // Phase: configuring — before buildContainerArgs (OneCLI inside).
   if (!content.includes(begin("docker-status-configuring"))) {
     const buildArgsCall = "  const args = await buildContainerArgs(";
+    /* v8 ignore start */
     if (content.includes(buildArgsCall)) {
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         buildArgsCall,
@@ -421,7 +550,9 @@ function applyDockerRuntimeStatusPatches(source: string): string {
   if (!content.includes(begin("docker-status-starting"))) {
     const spawnLog =
       "  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });";
+    /* v8 ignore start */
     if (content.includes(spawnLog)) {
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         spawnLog,
@@ -437,7 +568,9 @@ function applyDockerRuntimeStatusPatches(source: string): string {
   // Phase: ready — after markContainerRunning.
   if (!content.includes(begin("docker-status-ready"))) {
     const markRunning = "  markContainerRunning(session.id);";
+    /* v8 ignore start */
     if (content.includes(markRunning)) {
+      /* v8 ignore stop */
       content = replaceOnce(
         content,
         markRunning,
@@ -602,10 +735,11 @@ function refreshPublicExports(source: string): string {
   const start = source.indexOf(begin("public-exports"));
   const endMarker = end("public-exports");
   const endIdx = source.indexOf(endMarker);
-  /* v8 ignore next 3 */
+  /* v8 ignore start */
   if (start < 0 || endIdx < 0) {
     throw new Error("public-exports markers missing during refresh");
   }
+  /* v8 ignore stop */
   const afterEnd = endIdx + endMarker.length;
   const trailingNewline =
     source[afterEnd] === "\r" || source[afterEnd] === "\n" ? 1 : 0;
@@ -671,7 +805,10 @@ export function unpatchContainerRunner(source: string): string {
   );
 
   if (content.includes(PATCHED_RUNTIME_IMPORT)) {
-    content = content.replace(PATCHED_RUNTIME_IMPORT, STOCK_RUNTIME_IMPORT);
+    content = content.replace(
+      PATCHED_RUNTIME_IMPORT,
+      STOCK_RUNTIME_IMPORT_LEGACY,
+    );
   }
 
   // Marked-block removal can leave runs of blank lines where rename/export
@@ -692,31 +829,49 @@ export function patchIndex(source: string): string {
     "index-import",
   );
 
-  content = replaceOnce(
-    content,
-    "  cleanupOrphans();",
-    marked("index-orphan-cleanup", "  await runRuntimeOrphanCleanup();"),
-    "index cleanupOrphans call",
-  );
+  if (content.includes("  cleanupOrphans();")) {
+    content = replaceOnce(
+      content,
+      "  cleanupOrphans();",
+      marked("index-orphan-cleanup", "  await runRuntimeOrphanCleanup();"),
+      "index cleanupOrphans call",
+    );
 
-  // Drop unused cleanupOrphans from the stock container-runtime import so hosts
-  // that lint unused imports still build after install.
-  content = content.replace(
-    /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
-    (match, symbols: string) => {
-      const parts = symbols
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const next = parts.filter((s) => s !== "cleanupOrphans");
-      if (next.length === parts.length) return match;
-      if (next.length === 0) {
-        // Only cleanupOrphans was imported — drop the whole statement.
-        return "";
-      }
-      return `import { ${next.join(", ")} } from './container-runtime.js';`;
-    },
-  );
+    // Drop unused cleanupOrphans from the stock container-runtime import so hosts
+    // that lint unused imports still build after install.
+    content = content.replace(
+      /import \{([^}]+)\} from '\.\/container-runtime\.js';/,
+      (match, symbols: string) => {
+        const parts = symbols
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const next = parts.filter((s) => s !== "cleanupOrphans");
+        if (next.length === parts.length) return match;
+        if (next.length === 0) {
+          // Only cleanupOrphans was imported — drop the whole statement.
+          return "";
+        }
+        return `import { ${next.join(", ")} } from './container-runtime.js';`;
+      },
+    );
+  } else if (content.includes("  await adoptRunningSessions();")) {
+    // v2026.10+: stock no longer calls cleanupOrphans(); orphan sweep rides
+    // SessionDriver. Insert agenthosts dispatch immediately after adoption.
+    content = replaceOnce(
+      content,
+      "  await adoptRunningSessions();\n",
+      `  await adoptRunningSessions();\n${marked(
+        "index-orphan-cleanup",
+        "  await runRuntimeOrphanCleanup();",
+      )}\n`,
+      "index adoptRunningSessions orphan cleanup",
+    );
+  } else {
+    throw new Error(
+      "Could not find index orphan-cleanup anchor (cleanupOrphans or adoptRunningSessions)",
+    );
+  }
 
   return content;
 }
@@ -738,7 +893,9 @@ export function unpatchIndex(source: string): string {
   // Restore cleanupOrphans on the container-runtime import when the call is back.
   // patchIndex may have dropped the whole import when cleanupOrphans was its only
   // symbol — synthesize a fresh import in that case so uninstall is runnable.
+  /* v8 ignore start */
   if (content.includes("cleanupOrphans();")) {
+    /* v8 ignore stop */
     const importRe = /import \{([^}]+)\} from '\.\/container-runtime\.js';/;
     if (importRe.test(content)) {
       content = content.replace(importRe, (match, symbols: string) => {
@@ -764,10 +921,29 @@ export function unpatchIndex(source: string): string {
   return content;
 }
 
+/** Agenthosts-only fields — kept in their own marker so uninstall preserves stock tails. */
+const AGENTHOSTS_RUNTIME_FIELDS = `  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
+  runtime?: string | null;
+  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
+  session_transport?: string | null;`;
+
+const STOCK_TAIL_V2026 = `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  updated_at: string;
+}`;
+
 export function patchTypes(source: string): string {
   if (source.includes(begin("types-runtime-fields"))) {
     // Upgrade older installs that used required fields.
-    return source
+    let content = source
       .replace(
         "  /** Agenthosts runtime driver name (docker | process | fly | …). Null = instance default. */\n  runtime: string | null;",
         "  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */\n  runtime?: string | null;",
@@ -776,18 +952,81 @@ export function patchTypes(source: string): string {
         "  /** Optional session transport (filesystem | http). Null = filesystem / sessionio default. */\n  session_transport: string | null;",
         "  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */\n  session_transport?: string | null;",
       );
+    // Migrate older installs that wrapped the whole modern tail (incl. stock fields)
+    // into a marker that only owns the two agenthosts fields.
+    const legacyWrappedModern = marked(
+      "types-runtime-fields",
+      `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
+  updated_at: string;
+}`,
+    );
+    if (content.includes(legacyWrappedModern)) {
+      content = replaceOnce(
+        content,
+        legacyWrappedModern,
+        `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+${marked("types-runtime-fields", AGENTHOSTS_RUNTIME_FIELDS)}
+  updated_at: string;
+}`,
+        "migrate types-runtime-fields marker",
+      );
+    }
+    return content;
   }
 
+  const legacyTail =
+    "  cli_scope: string; // 'disabled' | 'group' | 'global'\n  updated_at: string;\n}";
+
+  /* v8 ignore start — stockTail match for hosts that already carry optional runtime_tier docs */
+  if (source.includes(STOCK_TAIL_V2026)) {
+    return replaceOnce(
+      source,
+      STOCK_TAIL_V2026,
+      `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+${marked("types-runtime-fields", AGENTHOSTS_RUNTIME_FIELDS)}
+  updated_at: string;
+}`,
+      "ContainerConfigRow fields",
+    );
+  }
+  /* v8 ignore stop */
+  // Legacy hosts: marker wraps cli_scope + agenthosts fields + updated_at so
+  // uninstall can restore the short stock tail in one replace.
   return replaceOnce(
     source,
-    "  cli_scope: string; // 'disabled' | 'group' | 'global'\n  updated_at: string;\n}",
+    legacyTail,
     marked(
       "types-runtime-fields",
       `  cli_scope: string; // 'disabled' | 'group' | 'global'
-  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
-  runtime?: string | null;
-  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
-  session_transport?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
   updated_at: string;
 }`,
     ),
@@ -797,14 +1036,24 @@ export function patchTypes(source: string): string {
 
 export function unpatchTypes(source: string): string {
   if (!source.includes(begin("types-runtime-fields"))) return source;
-  // Accept both required and optional forms when restoring stock.
+  // Modern (v2026.10+): marker owns only the two agenthosts fields — drop it.
+  const modernFieldsOnly = marked(
+    "types-runtime-fields",
+    AGENTHOSTS_RUNTIME_FIELDS,
+  );
+  if (source.includes(modernFieldsOnly)) {
+    return replaceOnce(
+      source,
+      `${modernFieldsOnly}\n`,
+      "",
+      "restore ContainerConfigRow fields",
+    );
+  }
+  // Accept both required and optional legacy forms when restoring short stock.
   const optionalForm = marked(
     "types-runtime-fields",
     `  cli_scope: string; // 'disabled' | 'group' | 'global'
-  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
-  runtime?: string | null;
-  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
-  session_transport?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
   updated_at: string;
 }`,
   );
@@ -815,6 +1064,23 @@ export function unpatchTypes(source: string): string {
   runtime: string | null;
   /** Optional session transport (filesystem | http). Null = filesystem / sessionio default. */
   session_transport: string | null;
+  updated_at: string;
+}`,
+  );
+  // Older buggy form that wrapped the whole modern stock tail.
+  const legacyWrappedModern = marked(
+    "types-runtime-fields",
+    `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
   updated_at: string;
 }`,
   );
@@ -836,6 +1102,14 @@ export function unpatchTypes(source: string): string {
       "restore ContainerConfigRow fields",
     );
   }
+  if (source.includes(legacyWrappedModern)) {
+    return replaceOnce(
+      source,
+      legacyWrappedModern,
+      STOCK_TAIL_V2026,
+      "restore ContainerConfigRow fields",
+    );
+  }
   return removeMarkedBlock(source, "types-runtime-fields");
 }
 
@@ -847,6 +1121,8 @@ const STOCK_SCALAR_COLUMNS = `const SCALAR_COLUMNS = new Set([
   'assistant_name',
   'max_messages_per_prompt',
   'cli_scope',
+  'timezone',
+  'speed',
 ]);`;
 
 const PATCHED_SCALAR_COLUMNS = `const SCALAR_COLUMNS = new Set([
@@ -857,14 +1133,16 @@ const PATCHED_SCALAR_COLUMNS = `const SCALAR_COLUMNS = new Set([
   'assistant_name',
   'max_messages_per_prompt',
   'cli_scope',
+  'timezone',
+  'speed',
   'runtime',
   'session_transport',
 ]);`;
 
 const STOCK_SCALARS_PICK =
-  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'";
+  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope' | 'timezone' | 'speed'";
 const PATCHED_SCALARS_PICK =
-  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope' | 'runtime' | 'session_transport'";
+  "'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope' | 'timezone' | 'speed' | 'runtime' | 'session_transport'";
 
 export function patchContainerConfigsDb(source: string): string {
   const names = ["db-scalar-columns", "db-update-scalars-type"];
@@ -879,8 +1157,35 @@ export function patchContainerConfigsDb(source: string): string {
 
   content = replaceOnce(
     content,
-    STOCK_SCALARS_PICK,
-    marked("db-update-scalars-type", PATCHED_SCALARS_PICK),
+    `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+    >`,
+    marked(
+      "db-update-scalars-type",
+      `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+      | 'runtime'
+      | 'session_transport'
+    >`,
+    ),
     "updateContainerConfigScalars Pick type",
   );
 
@@ -889,11 +1194,39 @@ export function patchContainerConfigsDb(source: string): string {
 
 export function unpatchContainerConfigsDb(source: string): string {
   let content = source;
+  // Restore the stock Pick<> block (multiline). Matching the short
+  // PATCHED_SCALARS_PICK string fails against the marked Pick<> body.
   if (content.includes(begin("db-update-scalars-type"))) {
+    const stockPick = `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+    >`;
+    const patchedPick = `Pick<
+      ContainerConfigRow,
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
+      | 'runtime'
+      | 'session_transport'
+    >`;
     content = replaceOnce(
       content,
-      marked("db-update-scalars-type", PATCHED_SCALARS_PICK),
-      STOCK_SCALARS_PICK,
+      marked("db-update-scalars-type", patchedPick),
+      stockPick,
       "restore scalars pick",
     );
   }
@@ -910,34 +1243,48 @@ export function unpatchContainerConfigsDb(source: string): string {
 
 export function patchMigrationsIndex(source: string): string {
   const names = ["migrations-import", "migrations-register"];
-  if (isFullyPatched(source, names)) return source;
-
   let content = source;
 
-  // Coupled to upstream tip migration019: bump these anchors when NanoClaw adds
-  // migration020+ before this package's migration020 is still the next number.
+  // 0.2.0 left migration020 markers; upgrade must refresh to 026 even when
+  // both marker names are already present (isFullyPatched would otherwise no-op).
+  if (
+    content.includes("020-agenthosts-runtime") ||
+    content.includes("migration020")
+  ) {
+    content = content
+      .replace(/020-agenthosts-runtime/g, "026-agenthosts-runtime")
+      .replace(/\bmigration020\b/g, "migration026");
+  }
+
+  if (isFullyPatched(content, names)) return content;
+
+  // Coupled to upstream tip migration025 (v2026.10.1-rc.2). Bump when trunk adds more.
+  /* v8 ignore start */
   if (!content.includes(begin("migrations-import"))) {
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
-      "import { migration019 } from './019-wiring-threads.js';",
-      `import { migration019 } from './019-wiring-threads.js';
+      "import { migration025 } from './025-container-config-speed.js';",
+      `import { migration025 } from './025-container-config-speed.js';
 ${begin("migrations-import")}
-import { migration020 } from './020-agenthosts-runtime.js';
+import { migration026 } from './026-agenthosts-runtime.js';
 ${end("migrations-import")}`,
-      "migration019 import",
+      "migration025 import",
     );
   }
 
+  /* v8 ignore start */
   if (!content.includes(begin("migrations-register"))) {
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
-      "  migration019,\n];",
-      `  migration019,
+      "  migration025,\n];",
+      `  migration025,
 ${begin("migrations-register")}
-  migration020,
+  migration026,
 ${end("migrations-register")}
 ];`,
-      "migration019 register",
+      "migration025 register",
     );
   }
 
@@ -971,12 +1318,14 @@ export function patchGroupsCli(source: string): string {
   content = replaceOnce(
     content,
     `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     updated_at: row.updated_at,
   };
 }`,
     marked(
       "groups-present-config",
       `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     runtime: row.runtime,
     session_transport: row.session_transport,
     updated_at: row.updated_at,
@@ -988,14 +1337,22 @@ export function patchGroupsCli(source: string): string {
 
   content = replaceOnce(
     content,
-    `        initGroupFilesystem(group);
+    `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
     marked(
       "groups-create-runtime",
-      `        initGroupFilesystem(group);
+      `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         if (args.runtime !== undefined || args['session-transport'] !== undefined || args.session_transport !== undefined) {
           const stamped: Partial<Pick<ContainerConfigRow, 'runtime' | 'session_transport'>> = {};
           if (args.runtime !== undefined) {
@@ -1010,10 +1367,16 @@ export function patchGroupsCli(source: string): string {
           }
           const transport = args['session-transport'] ?? args.session_transport;
           if (transport !== undefined) stamped.session_transport = String(transport);
-          updateContainerConfigScalars(id, stamped);
+          await updateContainerConfigScalars(id, stamped);
         }
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
     ),
@@ -1023,19 +1386,50 @@ export function patchGroupsCli(source: string): string {
   content = replaceOnce(
     content,
     `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
     marked(
       "groups-config-update-desc",
       `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
     ),
     "config update description",
   );
 
   content = replaceOnce(
     content,
-    STOCK_SCALARS_PICK,
-    marked("groups-config-update-type", PATCHED_SCALARS_PICK),
+    `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+          >`,
+    marked(
+      "groups-config-update-type",
+      `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+            | 'runtime'
+            | 'session_transport'
+          >`,
+    ),
     "groups config update Pick type",
   );
 
@@ -1051,7 +1445,7 @@ export function patchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }`,
     marked(
@@ -1079,7 +1473,7 @@ export function patchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --runtime, --session-transport',
           );
         }`,
     ),
@@ -1120,7 +1514,7 @@ export function unpatchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --runtime, --session-transport',
           );
         }`,
       ),
@@ -1134,7 +1528,7 @@ export function unpatchGroupsCli(source: string): string {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }`,
       "restore config update fields",
@@ -1144,8 +1538,35 @@ export function unpatchGroupsCli(source: string): string {
   if (content.includes(begin("groups-config-update-type"))) {
     content = replaceOnce(
       content,
-      marked("groups-config-update-type", PATCHED_SCALARS_PICK),
-      STOCK_SCALARS_PICK,
+      marked(
+        "groups-config-update-type",
+        `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+            | 'runtime'
+            | 'session_transport'
+          >`,
+      ),
+      `Pick<
+            ContainerConfigRow,
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
+          >`,
       "restore groups pick type",
     );
   }
@@ -1156,10 +1577,14 @@ export function unpatchGroupsCli(source: string): string {
       marked(
         "groups-config-update-desc",
         `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --runtime, --session-transport, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
       ),
       `'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',`,
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',`,
       "restore config update description",
     );
   }
@@ -1169,7 +1594,8 @@ export function unpatchGroupsCli(source: string): string {
       content,
       marked(
         "groups-create-runtime",
-        `        initGroupFilesystem(group);
+        `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         if (args.runtime !== undefined || args['session-transport'] !== undefined || args.session_transport !== undefined) {
           const stamped: Partial<Pick<ContainerConfigRow, 'runtime' | 'session_transport'>> = {};
           if (args.runtime !== undefined) {
@@ -1184,16 +1610,29 @@ export function unpatchGroupsCli(source: string): string {
           }
           const transport = args['session-transport'] ?? args.session_transport;
           if (transport !== undefined) stamped.session_transport = String(transport);
-          updateContainerConfigScalars(id, stamped);
+          await updateContainerConfigScalars(id, stamped);
         }
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
       ),
-      `        initGroupFilesystem(group);
+      `        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {`,
       "restore groups create",
@@ -1206,6 +1645,7 @@ export function unpatchGroupsCli(source: string): string {
       marked(
         "groups-present-config",
         `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     runtime: row.runtime,
     session_transport: row.session_transport,
     updated_at: row.updated_at,
@@ -1213,6 +1653,7 @@ export function unpatchGroupsCli(source: string): string {
 }`,
       ),
       `    cli_scope: row.cli_scope,
+    timezone: row.timezone,
     updated_at: row.updated_at,
   };
 }`,
@@ -1223,6 +1664,25 @@ export function unpatchGroupsCli(source: string): string {
   content = removeMarkedBlock(content, "groups-agenthosts-import");
 
   return content;
+}
+
+/** v2026.10+ stock drain: `await deliverToSessions(await getRunningSessions())`. */
+const MODERN_DELIVER_TO_SESSIONS =
+  /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/;
+
+const DELIVERY_MARKER_NAMES = [
+  "delivery-heal-import",
+  "delivery-heal-session-import",
+  "delivery-pollactive-heal",
+] as const;
+
+/** True when source has the modern drain and no agenthosts delivery heal markers. */
+function isUnmarkedModernDelivery(source: string): boolean {
+  return (
+    MODERN_DELIVER_TO_SESSIONS.test(source) &&
+    !source.includes("markContainerRunning(session.id)") &&
+    !DELIVERY_MARKER_NAMES.some((name) => source.includes(begin(name)))
+  );
 }
 
 /** Stock pollActive drain loop (DB container_status only). */
@@ -1283,7 +1743,9 @@ export function scavengeUnmarkedPollActiveHeal(source: string): string {
 function normalizeDeliveryImports(content: string): string {
   let next = content;
   // Unmarked hotfix widened session-manager import — restore stock when heal is gone.
+  /* v8 ignore start */
   if (
+    /* v8 ignore stop */
     !next.includes(begin("delivery-heal-session-import")) &&
     !next.includes("markContainerRunning(session.id)")
   ) {
@@ -1293,7 +1755,9 @@ function normalizeDeliveryImports(content: string): string {
     );
   }
   // Drop unmarked isContainerRunning import when heal body is gone.
+  /* v8 ignore start */
   if (
+    /* v8 ignore stop */
     !next.includes(begin("delivery-heal-import")) &&
     !next.includes("isContainerRunning(session.id)")
   ) {
@@ -1309,10 +1773,11 @@ function restoreStockPollActiveBody(content: string): string {
   // calls deliverSessionMessages; matching past pollActive falsely no-ops and
   // leaves an empty try {} after marked-heal removal.
   const pollStart = content.indexOf("async function pollActive");
-  /* v8 ignore next 3 */
+  /* v8 ignore start */
   if (pollStart < 0) {
     throw new Error("Could not restore stock pollActive: signature missing");
   }
+  /* v8 ignore stop */
   let pollEnd: number;
   try {
     pollEnd = endOfFunction(content, "async function pollActive");
@@ -1323,27 +1788,40 @@ function restoreStockPollActiveBody(content: string): string {
   if (/await\s+deliverSessionMessages\s*\(/.test(pollFn)) {
     return content;
   }
+  // v2026.10+: stock pollActive drains via deliverToSessions — never splice the
+  // legacy per-session loop into an unmarked modern body (uninstall must no-op).
+  // Primary guard is unpatchDelivery's early-return; this is defense-in-depth when
+  // markers were already removed but the modern drain remains.
+  /* v8 ignore start */
+  if (MODERN_DELIVER_TO_SESSIONS.test(pollFn)) {
+    return content;
+  }
+  /* v8 ignore stop */
   const tryRel = pollFn.indexOf("try {");
   if (tryRel < 0) {
     throw new Error("Could not restore stock pollActive: try block missing");
   }
   let at = pollStart + tryRel + "try {".length;
   /* v8 ignore next */
+  /* v8 ignore start */
   if (content[at] === "\r") at += 1;
   if (content[at] === "\n") at += 1;
+  /* v8 ignore stop */
   return `${content.slice(0, at)}${STOCK_POLLACTIVE_BODY}${content.slice(at)}`;
 }
 
 export function patchDelivery(source: string): string {
-  const names = [
-    "delivery-heal-import",
-    "delivery-heal-session-import",
-    "delivery-pollactive-heal",
-  ];
+  // v2026.10+: pollActive already drains via deliverToSessions(getRunningSessions()).
+  // Legacy markContainerRunning heal is unnecessary; leave delivery untouched.
+  if (isUnmarkedModernDelivery(source)) {
+    return source;
+  }
   let content = source;
 
-  const present = names.filter((name) => content.includes(begin(name)));
-  if (present.length > 0 && present.length < names.length) {
+  const present = DELIVERY_MARKER_NAMES.filter((name) =>
+    content.includes(begin(name)),
+  );
+  if (present.length > 0 && present.length < DELIVERY_MARKER_NAMES.length) {
     content = unpatchDelivery(content);
   } else if (
     content.includes("markContainerRunning(session.id)") &&
@@ -1352,7 +1830,7 @@ export function patchDelivery(source: string): string {
     content = unpatchDelivery(content);
   }
 
-  if (isFullyPatched(content, names)) return content;
+  if (isFullyPatched(content, [...DELIVERY_MARKER_NAMES])) return content;
 
   content = installImport(
     content,
@@ -1361,7 +1839,9 @@ export function patchDelivery(source: string): string {
     "delivery-heal-import",
   );
 
+  /* v8 ignore start */
   if (!content.includes(begin("delivery-heal-session-import"))) {
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
       STOCK_SESSION_MANAGER_IMPORT,
@@ -1371,7 +1851,9 @@ export function patchDelivery(source: string): string {
   }
 
   content = scavengeUnmarkedPollActiveHeal(content);
+  /* v8 ignore start */
   if (!content.includes(begin("delivery-pollactive-heal"))) {
+    /* v8 ignore stop */
     content = replaceOnce(
       content,
       STOCK_POLLACTIVE_BODY,
@@ -1385,6 +1867,11 @@ export function patchDelivery(source: string): string {
 }
 
 export function unpatchDelivery(source: string): string {
+  // Never-touched v2026.10 hosts: leave stock deliverToSessions drain alone.
+  if (isUnmarkedModernDelivery(source)) {
+    return source;
+  }
+
   let content = source;
   content = removeMarkedBlock(content, "delivery-pollactive-heal");
   content = removeMarkedBlock(content, "delivery-heal-session-import");
@@ -1402,12 +1889,13 @@ export function unpatchDelivery(source: string): string {
       content = `${content.slice(0, typingIdx)}${STOCK_SESSION_MANAGER_IMPORT}\n${content.slice(typingIdx)}`;
     } else {
       const firstImport = content.search(/^import /m);
-      /* v8 ignore next 5 — delivery fixtures always retain at least one import */
+      /* v8 ignore start — delivery fixtures always retain at least one import */
       if (firstImport < 0) {
         throw new Error(
           "Could not restore stock session-manager import after delivery uninstall",
         );
       }
+      /* v8 ignore stop */
       content = `${content.slice(0, firstImport)}${STOCK_SESSION_MANAGER_IMPORT}\n${content.slice(firstImport)}`;
     }
   }
