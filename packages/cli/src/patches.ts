@@ -1769,6 +1769,19 @@ function restoreStockPollActiveBody(content: string): string {
   if (/await\s+deliverSessionMessages\s*\(/.test(pollFn)) {
     return content;
   }
+  // v2026.10+: stock pollActive drains via deliverToSessions — never splice the
+  // legacy per-session loop into an unmarked modern body (uninstall must no-op).
+  // Primary guard is unpatchDelivery's early-return; this is defense-in-depth when
+  // markers were already removed but the modern drain remains.
+  /* v8 ignore start */
+  if (
+    /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/.test(
+      pollFn,
+    )
+  ) {
+    return content;
+  }
+  /* v8 ignore stop */
   const tryRel = pollFn.indexOf("try {");
   if (tryRel < 0) {
     throw new Error("Could not restore stock pollActive: try block missing");
@@ -1848,6 +1861,22 @@ export function patchDelivery(source: string): string {
 }
 
 export function unpatchDelivery(source: string): string {
+  const names = [
+    "delivery-heal-import",
+    "delivery-heal-session-import",
+    "delivery-pollactive-heal",
+  ];
+  // Never-touched v2026.10 hosts: leave stock deliverToSessions drain alone.
+  if (
+    /await\s+deliverToSessions\(\s*await\s+getRunningSessions\(\)\s*\)/.test(
+      source,
+    ) &&
+    !source.includes("markContainerRunning(session.id)") &&
+    !names.some((name) => source.includes(begin(name)))
+  ) {
+    return source;
+  }
+
   let content = source;
   content = removeMarkedBlock(content, "delivery-pollactive-heal");
   content = removeMarkedBlock(content, "delivery-heal-session-import");

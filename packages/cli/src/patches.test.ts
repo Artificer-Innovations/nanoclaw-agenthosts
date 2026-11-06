@@ -844,6 +844,22 @@ describe("coverage gaps for 2026.10 anchors", () => {
     expect(patchDelivery(modern)).toBe(modern);
   });
 
+  it("unpatchDelivery leaves unmarked modern deliverToSessions pollActive alone", () => {
+    const modern = `import { getRunningSessions } from './session-manager.js';
+async function pollActive(): Promise<void> {
+  try {
+    await deliverToSessions(await getRunningSessions());
+  } catch (err) {
+    log.error('pollActive failed', { err });
+  }
+  setTimeout(pollActive, ACTIVE_POLL_MS);
+}
+`;
+    expect(unpatchDelivery(modern)).toBe(modern);
+    expect(unpatchDelivery(modern)).not.toContain("deliverSessionMessages");
+    expect(unpatchDelivery(modern)).not.toContain("markContainerRunning");
+  });
+
   it("throws when index orphan-cleanup anchors are missing after import", () => {
     expect(() =>
       patchIndex(`import { adoptRunningSessions } from './session-manager.js';
