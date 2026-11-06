@@ -197,6 +197,81 @@ describe("patchContainerRunner", () => {
     expect(restored).not.toContain("getSession");
   });
 
+  it("preserves stock getSession import outside sessions-import markers", () => {
+    const withStock = fixtureSources.containerRunner.replace(
+      "import { writeSessionRouting } from './session-manager.js';\n",
+      "import { getSession } from './db/sessions.js';\nimport { writeSessionRouting } from './session-manager.js';\n",
+    );
+    const patched = patchContainerRunner(withStock);
+    // Stock import stays unmarked; markers are empty anchors.
+    expect(patched).toMatch(
+      /import \{ getSession \} from '\.\/db\/sessions\.js';\n\/\/ @nanoclaw-agenthosts:sessions-import:begin\n\/\/ @nanoclaw-agenthosts:sessions-import:end/,
+    );
+    const restored = unpatchContainerRunner(patched);
+    expect(restored).toContain(
+      "import { getSession } from './db/sessions.js';",
+    );
+    expect(restored).not.toContain("@nanoclaw-agenthosts:sessions-import");
+  });
+
+  it("unwraps multi-symbol stock getSession from sessions-import on upgrade", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate older wrap that nested a richer stock import inside the marker.
+    const wrapped = installed.replace(
+      new RegExp(
+        `${BEGIN("sessions-import")}\\n[\\s\\S]*?${END("sessions-import")}\\n?`,
+      ),
+      `${BEGIN("sessions-import")}
+import { getSession, listSessions } from './db/sessions.js';
+${END("sessions-import")}
+`,
+    );
+    const refreshed = patchContainerRunner(wrapped);
+    expect(refreshed).toMatch(
+      /import \{ getSession, listSessions \} from '\.\/db\/sessions\.js';\n\/\/ @nanoclaw-agenthosts:sessions-import:begin\n\/\/ @nanoclaw-agenthosts:sessions-import:end/,
+    );
+    const restored = unpatchContainerRunner(refreshed);
+    expect(restored).toContain(
+      "import { getSession, listSessions } from './db/sessions.js';",
+    );
+  });
+
+  it("patches container-runner without hosthooks markers via installImport", () => {
+    const noHosthooks = fixtureSources.containerRunner.replace(
+      /\/\/ @nanoclaw-hosthooks:container-import:begin[\s\S]*?\/\/ @nanoclaw-hosthooks:container-import:end\n/,
+      "",
+    );
+    expect(noHosthooks).not.toContain("hosthooks");
+    const patched = patchContainerRunner(noHosthooks);
+    expect(patched).toContain("@nanoclaw-agenthosts:container-import:begin");
+    expect(patched).toContain("registerRuntimeDriver");
+  });
+
+  it("relocates nested container-import outside hosthooks on upgrade", () => {
+    const installed = patchContainerRunner(fixtureSources.containerRunner);
+    // Simulate pre-0.2.1 placement: move agenthosts container-import inside hosthooks.
+    const ahBlockRe = new RegExp(
+      `${BEGIN("container-import").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n[\\s\\S]*?${END("container-import").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n?`,
+    );
+    const ahBlock = installed.match(ahBlockRe)?.[0];
+    expect(ahBlock).toBeTruthy();
+    const withoutAh = installed.replace(ahBlockRe, "");
+    const nested = withoutAh.replace(
+      "// @nanoclaw-hosthooks:container-import:end\n",
+      `${ahBlock}// @nanoclaw-hosthooks:container-import:end\n`,
+    );
+    expect(nested.indexOf(BEGIN("container-import"))).toBeLessThan(
+      nested.indexOf("// @nanoclaw-hosthooks:container-import:end"),
+    );
+    const refreshed = patchContainerRunner(nested);
+    const hhEnd = refreshed.indexOf(
+      "// @nanoclaw-hosthooks:container-import:end",
+    );
+    const ahBegin = refreshed.indexOf(BEGIN("container-import"));
+    expect(hhEnd).toBeGreaterThan(-1);
+    expect(ahBegin).toBeGreaterThan(hhEnd);
+  });
+
   it("only falls back to docker when runtime resolves to docker", () => {
     const patched = patchContainerRunner(fixtureSources.containerRunner);
     expect(patched).toContain("if (runtime === 'docker')");
@@ -601,6 +676,87 @@ ${END("types-runtime-fields")}`,
     expect(patched).toContain("migration026");
     expect(patchMigrationsIndex(patched)).toBe(patched);
     expect(unpatchMigrationsIndex(patched)).not.toContain("migration026");
+  });
+
+  it("refreshes migration020 markers to migration026 on upgrade", () => {
+    const stale = `import { migration025 } from './025-container-config-speed.js';
+${BEGIN("migrations-import")}
+import { migration020 } from './020-agenthosts-runtime.js';
+${END("migrations-import")}
+export const migrations = [
+  migration025,
+${BEGIN("migrations-register")}
+  migration020,
+${END("migrations-register")}
+];
+`;
+    const refreshed = patchMigrationsIndex(stale);
+    expect(refreshed).toContain("from './026-agenthosts-runtime.js'");
+    expect(refreshed).toContain("migration026");
+    expect(refreshed).not.toContain("migration020");
+    expect(refreshed).not.toContain("020-agenthosts");
+  });
+
+  it("unpatchTypes preserves modern stock fields when marker is fields-only", () => {
+    const modern = `export interface ContainerConfigRow {
+  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  updated_at: string;
+}`;
+    const patched = patchTypes(modern);
+    expect(patched).toContain(
+      "@nanoclaw-agenthosts:types-runtime-fields:begin",
+    );
+    expect(patched).toContain("runtime?: string | null");
+    const restored = unpatchTypes(patched);
+    expect(restored).toContain("timezone: string | null");
+    expect(restored).toContain("runtime_tier?: string | null");
+    expect(restored).not.toContain("session_transport");
+    expect(restored).not.toContain("@nanoclaw-agenthosts:types-runtime-fields");
+  });
+
+  it("migrates and uninstalls legacy wrapped-modern types marker", () => {
+    const legacyWrapped = `export interface ContainerConfigRow {
+${BEGIN("types-runtime-fields")}
+  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
+  runtime?: string | null;
+  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
+  session_transport?: string | null;
+  updated_at: string;
+}
+${END("types-runtime-fields")}
+}`;
+    // Upgrade path: shrink marker to agenthosts fields only.
+    const migrated = patchTypes(legacyWrapped);
+    expect(migrated).toContain("timezone: string | null");
+    expect(migrated).toMatch(
+      /runtime_tier\?: string \| null;\n\/\/ @nanoclaw-agenthosts:types-runtime-fields:begin/,
+    );
+    expect(unpatchTypes(migrated)).not.toContain("session_transport");
+
+    // Direct uninstall of the old wrapped form.
+    const restored = unpatchTypes(legacyWrapped);
+    expect(restored).toContain("runtime_tier?: string | null");
+    expect(restored).not.toContain("session_transport");
+    expect(restored).not.toContain("@nanoclaw-agenthosts:types-runtime-fields");
   });
 
   it("adds ncl --runtime wiring", () => {

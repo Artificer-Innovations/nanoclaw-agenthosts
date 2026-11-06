@@ -75,6 +75,82 @@ function removeMarkedBlock(content: string, name: string): string {
   return next;
 }
 
+/**
+ * If agenthosts `container-import` was nested inside hosthooks' container-import
+ * region (pre-0.2.1 placement), lift it to a sibling after the hosthooks end marker
+ * so hosthooks uninstall cannot delete agenthosts imports.
+ */
+function relocateContainerImportOutsideHosthooks(content: string): string {
+  const hhBegin = "// @nanoclaw-hosthooks:container-import:begin";
+  const hhEnd = "// @nanoclaw-hosthooks:container-import:end";
+  const ahBegin = begin("container-import");
+  const ahEnd = end("container-import");
+  const hhBeginIdx = content.indexOf(hhBegin);
+  const hhEndIdx = content.indexOf(hhEnd);
+  const ahBeginIdx = content.indexOf(ahBegin);
+  const ahEndIdx = content.indexOf(ahEnd);
+  if (hhBeginIdx < 0 || hhEndIdx < 0 || ahBeginIdx < 0 || ahEndIdx < 0) {
+    return content;
+  }
+  // Nested only when the full agenthosts block sits strictly inside hosthooks.
+  if (!(ahBeginIdx > hhBeginIdx && ahEndIdx < hhEndIdx)) return content;
+
+  let blockEnd = ahEndIdx + ahEnd.length;
+  /* v8 ignore next */
+  blockEnd += content.slice(blockEnd).match(/^\r?\n/)?.[0]?.length ?? 0;
+  const block = content.slice(ahBeginIdx, blockEnd);
+  const without = content.slice(0, ahBeginIdx) + content.slice(blockEnd);
+  const newHhEndIdx = without.indexOf(hhEnd);
+  /* v8 ignore start */
+  if (newHhEndIdx < 0) return content;
+  /* v8 ignore stop */
+  let insertAt = newHhEndIdx + hhEnd.length;
+  insertAt += without.slice(insertAt).match(/^\r?\n/)?.[0]?.length ?? 0;
+  return without.slice(0, insertAt) + block + without.slice(insertAt);
+}
+
+/**
+ * Keep stock `getSession` imports outside the removable sessions-import region.
+ * Empty markers still anchor create-require-import placement. Agenthosts-added
+ * `import { getSession }` (sole symbol) stays inside the marker so uninstall
+ * removes it.
+ */
+function ensureSessionsImportAnchor(content: string): string {
+  if (content.includes(begin("sessions-import"))) {
+    // Unwrap older installs that nested a richer stock import inside the marker.
+    // Leave the agenthosts-owned `import { getSession }` form alone.
+    const wrappedMulti =
+      /\/\/ @nanoclaw-agenthosts:sessions-import:begin\r?\n(import \{[^}]*\bgetSession\b[^}]*\} from '\.\/db\/sessions\.js';)\r?\n\/\/ @nanoclaw-agenthosts:sessions-import:end\r?\n?/;
+    const match = content.match(wrappedMulti);
+    if (match?.[1] && /,\s*\w|\w\s*,/.test(match[1])) {
+      return content.replace(
+        wrappedMulti,
+        `$1\n${begin("sessions-import")}\n${end("sessions-import")}\n`,
+      );
+    }
+    return content;
+  }
+  if (
+    /import \{[^}]*\bgetSession\b[^}]*\} from '\.\/db\/sessions\.js';/.test(
+      content,
+    )
+  ) {
+    /* v8 ignore start — stock hosts already import getSession; fixtures use installImport */
+    return content.replace(
+      /(import \{[^}]*\} from '\.\/db\/sessions\.js';)/,
+      `$1\n${begin("sessions-import")}\n${end("sessions-import")}`,
+    );
+    /* v8 ignore stop */
+  }
+  return installImport(
+    content,
+    "./db/sessions.js",
+    ["getSession"],
+    "sessions-import",
+    { afterMarker: "container-import" },
+  );
+}
+
 function marked(name: string, body: string): string {
   return `${begin(name)}\n${body}\n${end(name)}`;
 }
@@ -191,13 +267,9 @@ export function patchContainerRunner(source: string): string {
   // Already installed (v1): ensure sibling imports + refresh public-exports body.
   if (coreNames.every((name) => source.includes(begin(name)))) {
     let content = widenAgenthostsImport(source);
-    content = installImport(
-      content,
-      "./db/sessions.js",
-      ["getSession"],
-      "sessions-import",
-      { afterMarker: "container-import" },
-    );
+    // Upgrade path: earlier placement could nest agenthosts inside hosthooks.
+    content = relocateContainerImportOutsideHosthooks(content);
+    content = ensureSessionsImportAnchor(content);
     content = installImport(
       content,
       "node:module",
@@ -242,29 +314,9 @@ export function patchContainerRunner(source: string): string {
   }
 
   // Insert as a sibling after container-import:end — never nest inside that block.
-  // v2026.10+ already imports getSession for SessionDriver composition.
-  // Wrap the existing import with markers instead of declaring a duplicate.
-  if (
-    !content.includes(begin("sessions-import")) &&
-    /import \{[^}]*\bgetSession\b[^}]*\} from '\.\/db\/sessions\.js';/.test(
-      content,
-    )
-  ) {
-    /* v8 ignore start — stock fixture uses installImport; wrap path is for live hosts */
-    content = content.replace(
-      /import \{([^}]*)\} from '\.\/db\/sessions\.js';/,
-      `${begin("sessions-import")}\nimport { $1 } from './db/sessions.js';\n${end("sessions-import")}`,
-    );
-    /* v8 ignore stop */
-  } else {
-    content = installImport(
-      content,
-      "./db/sessions.js",
-      ["getSession"],
-      "sessions-import",
-      { afterMarker: "container-import" },
-    );
-  }
+  // v2026.10+ already imports getSession for SessionDriver composition — keep that
+  // stock import outside the removable region (empty marker anchors createRequire).
+  content = ensureSessionsImportAnchor(content);
 
   content = installImport(
     content,
@@ -869,10 +921,29 @@ export function unpatchIndex(source: string): string {
   return content;
 }
 
+/** Agenthosts-only fields — kept in their own marker so uninstall preserves stock tails. */
+const AGENTHOSTS_RUNTIME_FIELDS = `  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
+  runtime?: string | null;
+  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
+  session_transport?: string | null;`;
+
+const STOCK_TAIL_V2026 = `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+  updated_at: string;
+}`;
+
 export function patchTypes(source: string): string {
   if (source.includes(begin("types-runtime-fields"))) {
     // Upgrade older installs that used required fields.
-    return source
+    let content = source
       .replace(
         "  /** Agenthosts runtime driver name (docker | process | fly | …). Null = instance default. */\n  runtime: string | null;",
         "  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */\n  runtime?: string | null;",
@@ -881,9 +952,11 @@ export function patchTypes(source: string): string {
         "  /** Optional session transport (filesystem | http). Null = filesystem / sessionio default. */\n  session_transport: string | null;",
         "  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */\n  session_transport?: string | null;",
       );
-  }
-
-  const stockTail = `  cli_scope: string; // 'disabled' | 'group' | 'global'
+    // Migrate older installs that wrapped the whole modern tail (incl. stock fields)
+    // into a marker that only owns the two agenthosts fields.
+    const legacyWrappedModern = marked(
+      "types-runtime-fields",
+      `  cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   speed: ContainerSpeed | null; // NULL = install/provider default
   /**
@@ -893,13 +966,42 @@ export function patchTypes(source: string): string {
    * and \`SELECT *\` rows surface it here. Absent means the default tier.
    */
   runtime_tier?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
   updated_at: string;
-}`;
+}`,
+    );
+    if (content.includes(legacyWrappedModern)) {
+      content = replaceOnce(
+        content,
+        legacyWrappedModern,
+        `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+${marked("types-runtime-fields", AGENTHOSTS_RUNTIME_FIELDS)}
+  updated_at: string;
+}`,
+        "migrate types-runtime-fields marker",
+      );
+    }
+    return content;
+  }
 
   const legacyTail =
     "  cli_scope: string; // 'disabled' | 'group' | 'global'\n  updated_at: string;\n}";
 
-  const patchedTail = `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  /* v8 ignore start — stockTail match for hosts that already carry optional runtime_tier docs */
+  if (source.includes(STOCK_TAIL_V2026)) {
+    return replaceOnce(
+      source,
+      STOCK_TAIL_V2026,
+      `  cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   speed: ContainerSpeed | null; // NULL = install/provider default
   /**
@@ -909,33 +1011,22 @@ export function patchTypes(source: string): string {
    * and \`SELECT *\` rows surface it here. Absent means the default tier.
    */
   runtime_tier?: string | null;
-  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
-  runtime?: string | null;
-  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
-  session_transport?: string | null;
+${marked("types-runtime-fields", AGENTHOSTS_RUNTIME_FIELDS)}
   updated_at: string;
-}`;
-
-  /* v8 ignore start — stockTail match for hosts that already carry optional runtime_tier docs */
-  if (source.includes(stockTail)) {
-    return replaceOnce(
-      source,
-      stockTail,
-      marked("types-runtime-fields", patchedTail),
+}`,
       "ContainerConfigRow fields",
     );
   }
   /* v8 ignore stop */
+  // Legacy hosts: marker wraps cli_scope + agenthosts fields + updated_at so
+  // uninstall can restore the short stock tail in one replace.
   return replaceOnce(
     source,
     legacyTail,
     marked(
       "types-runtime-fields",
       `  cli_scope: string; // 'disabled' | 'group' | 'global'
-  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
-  runtime?: string | null;
-  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
-  session_transport?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
   updated_at: string;
 }`,
     ),
@@ -945,14 +1036,24 @@ export function patchTypes(source: string): string {
 
 export function unpatchTypes(source: string): string {
   if (!source.includes(begin("types-runtime-fields"))) return source;
-  // Accept both required and optional forms when restoring stock.
+  // Modern (v2026.10+): marker owns only the two agenthosts fields — drop it.
+  const modernFieldsOnly = marked(
+    "types-runtime-fields",
+    AGENTHOSTS_RUNTIME_FIELDS,
+  );
+  if (source.includes(modernFieldsOnly)) {
+    return replaceOnce(
+      source,
+      `${modernFieldsOnly}\n`,
+      "",
+      "restore ContainerConfigRow fields",
+    );
+  }
+  // Accept both required and optional legacy forms when restoring short stock.
   const optionalForm = marked(
     "types-runtime-fields",
     `  cli_scope: string; // 'disabled' | 'group' | 'global'
-  /** Agenthosts runtime driver name (docker | process | fly | …). Null/absent = instance default. */
-  runtime?: string | null;
-  /** Optional session transport (filesystem | http). Null/absent = filesystem / sessionio default. */
-  session_transport?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
   updated_at: string;
 }`,
   );
@@ -963,6 +1064,23 @@ export function unpatchTypes(source: string): string {
   runtime: string | null;
   /** Optional session transport (filesystem | http). Null = filesystem / sessionio default. */
   session_transport: string | null;
+  updated_at: string;
+}`,
+  );
+  // Older buggy form that wrapped the whole modern stock tail.
+  const legacyWrappedModern = marked(
+    "types-runtime-fields",
+    `  cli_scope: string; // 'disabled' | 'group' | 'global'
+  timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  speed: ContainerSpeed | null; // NULL = install/provider default
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and \`SELECT *\` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
+${AGENTHOSTS_RUNTIME_FIELDS}
   updated_at: string;
 }`,
   );
@@ -981,6 +1099,14 @@ export function unpatchTypes(source: string): string {
       source,
       requiredForm,
       stock,
+      "restore ContainerConfigRow fields",
+    );
+  }
+  if (source.includes(legacyWrappedModern)) {
+    return replaceOnce(
+      source,
+      legacyWrappedModern,
+      STOCK_TAIL_V2026,
       "restore ContainerConfigRow fields",
     );
   }
@@ -1117,9 +1243,20 @@ export function unpatchContainerConfigsDb(source: string): string {
 
 export function patchMigrationsIndex(source: string): string {
   const names = ["migrations-import", "migrations-register"];
-  if (isFullyPatched(source, names)) return source;
-
   let content = source;
+
+  // 0.2.0 left migration020 markers; upgrade must refresh to 026 even when
+  // both marker names are already present (isFullyPatched would otherwise no-op).
+  if (
+    content.includes("020-agenthosts-runtime") ||
+    content.includes("migration020")
+  ) {
+    content = content
+      .replace(/020-agenthosts-runtime/g, "026-agenthosts-runtime")
+      .replace(/\bmigration020\b/g, "migration026");
+  }
+
+  if (isFullyPatched(content, names)) return content;
 
   // Coupled to upstream tip migration025 (v2026.10.1-rc.2). Bump when trunk adds more.
   /* v8 ignore start */
