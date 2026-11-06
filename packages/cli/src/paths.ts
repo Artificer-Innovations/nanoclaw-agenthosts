@@ -13,8 +13,8 @@ export const HOST_COPY_RULES: CopyRule[] = [
   { source: "warn-once.ts", dest: "src/warn-once.ts" },
   { source: "agenthosts.ts", dest: "src/agenthosts.ts" },
   {
-    source: "020-agenthosts-runtime.ts",
-    dest: "src/db/migrations/020-agenthosts-runtime.ts",
+    source: "026-agenthosts-runtime.ts",
+    dest: "src/db/migrations/026-agenthosts-runtime.ts",
   },
 ];
 

@@ -146,6 +146,8 @@ const SCALAR_COLUMNS = new Set([
   'assistant_name',
   'max_messages_per_prompt',
   'cli_scope',
+  'timezone',
+  'speed',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
@@ -158,7 +160,15 @@ export function updateContainerConfigScalars(
   updates: Partial<
     Pick<
       ContainerConfigRow,
-      'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
+      | 'speed'
     >
   >,
 ): void {
@@ -168,7 +178,7 @@ export function updateContainerConfigScalars(
 `,
 
   migrationsIndex: `import type Database from 'better-sqlite3';
-import { migration019 } from './019-wiring-threads.js';
+import { migration025 } from './025-container-config-speed.js';
 
 export interface Migration {
   version: number;
@@ -177,7 +187,7 @@ export interface Migration {
 }
 
 export const migrations: Migration[] = [
-  migration019,
+  migration025,
 ];
 `,
 
@@ -188,6 +198,10 @@ export const migrations: Migration[] = [
 } from '../../db/container-configs.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
+
+type RestampResult = { changes: unknown; plugin: unknown };
+function formatRestampResult(data: RestampResult): string { return JSON.stringify(data); }
+function localizeIsoTimestamps(data: unknown): unknown { return data; }
 
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
   return {
@@ -204,6 +218,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    timezone: row.timezone,
     updated_at: row.updated_at,
   };
 }
@@ -214,9 +229,17 @@ const handlers = {
         const folder = args.folder as string;
         const id = 'ag-test';
         const group = { id, name: folder, folder } as AgentGroup;
-        initGroupFilesystem(group);
+        const timezone = args.timezone as string | undefined;
+        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         return getAgentGroupByFolder(folder);
       },
+      // The restamp path returns a plan that wants the aligned-lines view;
+      // everything else keeps the generic JSON rendering.
+      formatHuman: (data) =>
+        data !== null && typeof data === 'object' && 'changes' in data && 'plugin' in data
+          ? formatRestampResult(data as RestampResult)
+          : JSON.stringify(localizeIsoTimestamps(data), null, 2),
     },
     delete: {
       handler: async () => ({}),
@@ -224,13 +247,23 @@ const handlers = {
     'config update': {
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run \`ncl groups restart\`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args: Record<string, unknown>) => {
         const id = args.id as string;
         const updates: Partial<
           Pick<
             ContainerConfigRow,
-            'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'speed'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -244,7 +277,7 @@ const handlers = {
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }
         updateContainerConfigScalars(id, updates);

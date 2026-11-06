@@ -10,7 +10,7 @@ const required = [
   "skills/add-agenthosts/SKILL.md",
   "skills/add-agenthosts/resources/host/agenthosts.ts",
   "skills/add-agenthosts/resources/host/warn-once.ts",
-  "skills/add-agenthosts/resources/host/020-agenthosts-runtime.ts",
+  "skills/add-agenthosts/resources/host/026-agenthosts-runtime.ts",
 ];
 const missing = required.filter(
   (relativePath) => !fs.existsSync(path.join(root, relativePath)),

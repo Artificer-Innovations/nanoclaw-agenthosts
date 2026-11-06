@@ -48,7 +48,7 @@ describe("install / verify / uninstall", () => {
     expect(fs.existsSync(path.join(root, "src/agenthosts.ts"))).toBe(true);
     expect(
       fs.existsSync(
-        path.join(root, "src/db/migrations/020-agenthosts-runtime.ts"),
+        path.join(root, "src/db/migrations/026-agenthosts-runtime.ts"),
       ),
     ).toBe(true);
     expect(

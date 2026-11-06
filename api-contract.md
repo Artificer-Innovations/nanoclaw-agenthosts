@@ -47,7 +47,7 @@ Public `wakeContainer` builds a `WakeContext` via `createWakeContext(session)` a
 - Marker blocks: `// @nanoclaw-agenthosts:<name>:begin|end`
 - Compute all transforms, then atomic commit with rollback
 - Idempotent install/upgrade; verify fails closed on partial markers or moved anchors
-- Copied modules: `src/agenthosts.ts`, `src/warn-once.ts`, `src/db/migrations/020-agenthosts-runtime.ts`
+- Copied modules: `src/agenthosts.ts`, `src/warn-once.ts`, `src/db/migrations/026-agenthosts-runtime.ts`
 - Patched files: `container-runner.ts`, `index.ts`, `types.ts`, `db/container-configs.ts`, `db/migrations/index.ts`, `cli/resources/groups.ts`
 
 ## Capability probe
